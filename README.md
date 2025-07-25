@@ -24,17 +24,17 @@ uv pip install -e .
   Contains shell scripts for running experiments and illustrative examples.
 - `saved_models/`
   Houses two pretrained CLIP models: one using ReLU attention and another using softmax attention.
-- `src/`
+- `src/ghmclip/`
   Source code directory:
-  - `src/data/data_random_GHM.py`
+  - `src/ghmclip/data/data_random_GHM.py`
     Generates random data using various samplers.
-  - `src/models/model.py`: 
+  - `src/ghmclip/models/model.py`: 
     Defines models for all tasks.
-  - `src/models/optimizer.py`
+  - `src/ghmclip/models/optimizer.py`
     Implements optimization algorithms.
-  - `src/training/train_[task_name].py`
+  - `src/ghmclip/training/train_[task_name].py`
     Specifies training routines for individual tasks.
-  - `src/utils/`
+  - `src/ghmclip/utils/`
     Contains utility scripts for configuration initialization and logging.
 - `logs`
   Contains log files for all trainings.
@@ -50,16 +50,17 @@ bashCopy codechmod +x ./eg_[task_name].sh
 
 Here, `[task_name]` can be one of:
 
-- `clip`: CLIP task.
-- `dns`: Jointly trains a CLIP model and a denoising model for conditional denoising tasks.
-- `sdns`: Trains only the denoising model while keeping the CLIP features fixed for conditional denoising tasks.
-- `nwp`: Jointly trains a CLIP model and a transformer for next-word prediction.
-- `snwp`: Trains only the transformer while keeping the CLIP features fixed for next-word prediction.
+- `CLS`: CLIP task.
+- `CDNS`: Jointly trains a CLIP model and a denoising model for conditional denoising tasks.
+- `sequential_DNS`: Trains only the denoising model while keeping the CLIP features fixed for conditional denoising tasks.
+- `NWP`: Jointly trains a CLIP model and a transformer for next-word prediction.
+- `sequential_NWP`: Trains only the transformer while keeping the CLIP features fixed for next-word prediction.
+- `SimCLR`: Trains a SimCLR model.
 
 For more details about each configuration, refer to:
 
-- `src/training/train_[task_name].py`
-- `src/utils/config.py`
+- `src/ghmclip/training/train_[task_name].py`
+- `src/ghmclip/utils/config.py`
 
 You can modify the provided shell scripts in `experiments/` to change training parameters as needed.
 

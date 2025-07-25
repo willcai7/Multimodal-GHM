@@ -1,7 +1,7 @@
 cd "../"
 
-python -m ghmclip.training.train_PRH_SimCLR  \
-    --job_name='PRH_simclr' \
+python -m ghmclip.training.train_SimCLR  \
+    --job_name='SimCLR' \
     --model_type='TF' \
     --n_tree_layer=4 \
     --n_tree_child=3 \
