@@ -1,3 +1,25 @@
+Metadata-Version: 2.4
+Name: ghmclip
+Version: 0.1.0
+Summary: Add your description here
+Requires-Python: ==3.12.*
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: accelerate>=1.5.1
+Requires-Dist: aiohttp==3.11.16
+Requires-Dist: datasets>=3.3.2
+Requires-Dist: matplotlib>=3.10.1
+Requires-Dist: numpy>=2.2.3
+Requires-Dist: pandas>=2.2.3
+Requires-Dist: pillow>=11.1.0
+Requires-Dist: seaborn>=0.13.2
+Requires-Dist: torch>=2.6.0
+Requires-Dist: torchvision>=0.21.0
+Requires-Dist: tqdm>=4.67.1
+Requires-Dist: transformers>=4.49.0
+Requires-Dist: wandb>=0.19.10
+Dynamic: license-file
+
 # Multimodal Learning with GHM
 
 This repository provides the official implementation for the paper: 
@@ -10,12 +32,12 @@ Paper: https://arxiv.org/abs/2501.04641
 
 ## Setup 
 
-To get started, create a new `uv` environment and install all required packages:
+To get started, create a new conda environment and install all required packages:
 
 ```shell
-uv venv --python 3.12
-source activate .venv/bin/activate
-uv pip install -e .
+conda create -n GHM python=3.10 --yes
+conda activate GHM
+pip install -r requirements.txt
 ```
 
 ### Repository Structure
