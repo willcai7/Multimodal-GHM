@@ -4,10 +4,6 @@ This repository provides the official implementation for the paper:
 
 **A Statistical Theory of Contrastive Pre-training and Multimodal Generative AI.**
 
-Oko Kazusato, Licong Lin, Yuhang Cai, Song Mei. 
-
-Paper: https://arxiv.org/abs/2501.04641 
-
 ## Setup 
 
 To get started, create a new conda environment and install all required packages:
@@ -62,19 +58,4 @@ For more details about each configuration, refer to:
 - `src/utils/config.py`
 
 You can modify the provided shell scripts in `experiments/` to change training parameters as needed.
-
-## Miscellaneous
-
-If you find this code useful in your research, please cite our paper:
-
-```
-@article{oko2025multimodal,
-      title={A Statistical Theory of Contrastive Pre-training and Multimodal Generative AI}, 
-      author={Kazusato Oko and Licong Lin and Yuhang Cai and Song Mei},
-      year={2025},
-      archivePrefix={arXiv},
-}
-```
-
-Thank you for your interest in our work! If you have any questions or encounter any issues, feel free to open an issue or submit a pull request.
 
