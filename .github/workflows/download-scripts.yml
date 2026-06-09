@@ -1,0 +1,33 @@
+name: Download scripts
+
+on:
+  pull_request:
+  push:
+
+jobs:
+  portability:
+    name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Run download helper unit tests
+        run: python -m unittest tests.test_download_scripts
+
+      - name: Check checkpoint downloader CLI
+        run: python scripts/download_ckpt.py --help
+
+      - name: Check data downloader CLI
+        run: python scripts/download_data.py --help

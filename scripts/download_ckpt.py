@@ -15,11 +15,20 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REQUIRED_FAMILIES = ("CLIP", "CDM", "VLM")
+TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
+
+
+def bool_env(name: str, default: bool = False) -> bool:
+    """Read a portable boolean environment variable."""
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in TRUE_ENV_VALUES
 
 
 def normalize_path(value: str | Path) -> Path:
-    """Handle WSL-style paths passed to Windows Python."""
-    value = str(value)
+    """Normalize user-provided local filesystem paths."""
+    value = os.path.expandvars(os.path.expanduser(str(value)))
     if os.name == "nt" and value.startswith("/mnt/") and len(value) > 6:
         drive = value[5]
         tail = value[7:].replace("/", "\\")
@@ -48,12 +57,14 @@ def parse_args() -> argparse.Namespace:
         type=normalize_path,
         default=env_path("CHECKPOINT_DIR", REPO_ROOT / "checkpoints"),
     )
-    parser.add_argument("--dry-run", action="store_true", default=os.environ.get("DRY_RUN", "0") == "1")
-    parser.add_argument("--check-only", action="store_true", default=os.environ.get("CHECK_ONLY", "0") == "1")
+    parser.add_argument("--dry-run", action="store_true", default=bool_env("DRY_RUN"))
+    parser.add_argument("--check-only", action="store_true", default=bool_env("CHECK_ONLY"))
     return parser.parse_args()
 
 
 def main() -> int:
+    args = parse_args()
+
     try:
         from huggingface_hub import HfApi, snapshot_download
     except Exception as exc:
@@ -63,7 +74,6 @@ def main() -> int:
             f"Import error: {exc}"
         )
 
-    args = parse_args()
     repo_id = args.repo
     cache_dir = args.cache_dir
     checkpoint_dir = args.checkpoint_dir
@@ -75,7 +85,15 @@ def main() -> int:
     print(f"    Local cache:       {cache_dir}")
     print(f"    Output directory:  {checkpoint_dir}")
 
-    remote_files = HfApi().list_repo_files(repo_id=repo_id, repo_type="model")
+    try:
+        remote_files = HfApi().list_repo_files(repo_id=repo_id, repo_type="model")
+    except Exception as exc:
+        raise SystemExit(
+            "ERROR: failed to inspect the checkpoint repository. Check your "
+            "network connection and repository access.\n"
+            f"Inspection error: {exc}"
+        )
+
     checkpoint_files = [
         path
         for path in remote_files
@@ -100,14 +118,21 @@ def main() -> int:
         print(f"{mode}: no checkpoint files downloaded or staged.")
         return 0
 
-    local_dir = Path(
-        snapshot_download(
-            repo_id=repo_id,
-            repo_type="model",
-            allow_patterns=["logs/**"],
-            local_dir=cache_dir,
+    try:
+        local_dir = Path(
+            snapshot_download(
+                repo_id=repo_id,
+                repo_type="model",
+                allow_patterns=["logs/**"],
+                local_dir=cache_dir,
+            )
         )
-    )
+    except Exception as exc:
+        raise SystemExit(
+            "ERROR: failed to download checkpoints. Check your network "
+            "connection, disk space, and Hugging Face access.\n"
+            f"Download error: {exc}"
+        )
 
     logs_dir = local_dir / "logs"
     if not logs_dir.exists():
@@ -120,6 +145,8 @@ def main() -> int:
         dst = checkpoint_dir / family
         if not src.exists():
             raise SystemExit(f"ERROR: missing logs/{family} in downloaded snapshot: {logs_dir}")
+        if dst.exists() and not dst.is_dir():
+            raise SystemExit(f"ERROR: checkpoint target exists and is not a directory: {dst}")
         shutil.copytree(src, dst, dirs_exist_ok=True)
         staged.append(family)
         print(f"staged logs/{family} -> {dst}")

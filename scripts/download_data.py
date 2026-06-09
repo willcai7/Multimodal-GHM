@@ -11,7 +11,7 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -20,16 +20,33 @@ DEFAULT_SOURCE_FILE = (
     "RN50-quickgelu_cc12m_20251208_214315/"
     "similarities_targets.pt"
 )
+TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
+
+
+def bool_env(name: str, default: bool = False) -> bool:
+    """Read a portable boolean environment variable."""
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in TRUE_ENV_VALUES
 
 
 def normalize_path(value: str | Path) -> Path:
-    """Handle WSL-style paths passed to Windows Python."""
-    value = str(value)
+    """Normalize user-provided local filesystem paths."""
+    value = os.path.expandvars(os.path.expanduser(str(value)))
     if os.name == "nt" and value.startswith("/mnt/") and len(value) > 6:
         drive = value[5]
         tail = value[7:].replace("/", "\\")
         return Path(f"{drive.upper()}:\\{tail}")
     return Path(value)
+
+
+def normalize_repo_path(value: str | Path) -> str:
+    """Normalize Hugging Face repository paths to slash-separated paths."""
+    path = str(PurePosixPath(str(value).replace("\\", "/"))).lstrip("/")
+    if path in {"", "."}:
+        raise argparse.ArgumentTypeError("repository path must not be empty")
+    return path
 
 
 def env_path(name: str, default: Path) -> Path:
@@ -43,7 +60,11 @@ def env_path(name: str, default: Path) -> Path:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", default=os.environ.get("HF_IMAGENET_REPO", "BiasCLIP/BiasCLIP"))
-    parser.add_argument("--source-file", default=os.environ.get("HF_IMAGENET_FILE", DEFAULT_SOURCE_FILE))
+    parser.add_argument(
+        "--source-file",
+        type=normalize_repo_path,
+        default=normalize_repo_path(os.environ.get("HF_IMAGENET_FILE", DEFAULT_SOURCE_FILE)),
+    )
     parser.add_argument(
         "--cache-dir",
         type=normalize_path,
@@ -57,13 +78,42 @@ def parse_args() -> argparse.Namespace:
             REPO_ROOT / "figures" / "data" / "imagenet-data" / "similarities_targets.pt",
         ),
     )
-    parser.add_argument("--force", action="store_true", default=os.environ.get("FORCE", "0") == "1")
-    parser.add_argument("--dry-run", action="store_true", default=os.environ.get("DRY_RUN", "0") == "1")
-    parser.add_argument("--check-only", action="store_true", default=os.environ.get("CHECK_ONLY", "0") == "1")
+    parser.add_argument("--force", action="store_true", default=bool_env("FORCE"))
+    parser.add_argument("--dry-run", action="store_true", default=bool_env("DRY_RUN"))
+    parser.add_argument("--check-only", action="store_true", default=bool_env("CHECK_ONLY"))
     return parser.parse_args()
 
 
+def paths_refer_to_same_file(left: Path, right: Path) -> bool:
+    """Return True when both paths point to the same existing file."""
+    try:
+        return left.exists() and right.exists() and left.samefile(right)
+    except OSError:
+        return False
+
+
+def stage_downloaded_file(src: Path, target_file: Path) -> str:
+    """Stage one downloaded file by hard-linking when possible, copying otherwise."""
+    if paths_refer_to_same_file(src, target_file):
+        return "already in place"
+
+    target_file.parent.mkdir(parents=True, exist_ok=True)
+    if target_file.exists() and target_file.is_dir():
+        raise SystemExit(f"ERROR: target file path is a directory: {target_file}")
+    if target_file.exists() or target_file.is_symlink():
+        target_file.unlink()
+
+    try:
+        os.link(src, target_file)
+        return "hard-linked"
+    except OSError:
+        shutil.copy2(src, target_file)
+        return "copied"
+
+
 def main() -> int:
+    args = parse_args()
+
     try:
         from huggingface_hub import HfApi, snapshot_download
     except Exception as exc:
@@ -73,7 +123,6 @@ def main() -> int:
             f"Import error: {exc}"
         )
 
-    args = parse_args()
     repo_id = args.repo
     source_file = args.source_file
     cache_dir = args.cache_dir
@@ -92,7 +141,9 @@ def main() -> int:
         print("Target already exists. Set FORCE=1 to download again.")
         return 0
 
-    parent = str(Path(source_file).parent).replace("\\", "/")
+    parent = str(PurePosixPath(source_file).parent)
+    if parent == ".":
+        parent = ""
     try:
         entries = list(
             HfApi().list_repo_tree(
@@ -152,16 +203,7 @@ def main() -> int:
     if not src.exists():
         raise SystemExit(f"ERROR: downloaded file not found: {src}")
 
-    target_file.parent.mkdir(parents=True, exist_ok=True)
-    if target_file.exists():
-        target_file.unlink()
-
-    try:
-        os.link(src, target_file)
-        transfer = "hard-linked"
-    except OSError:
-        shutil.copy2(src, target_file)
-        transfer = "copied"
+    transfer = stage_downloaded_file(src, target_file)
 
     if not target_file.exists() or target_file.stat().st_size == 0:
         raise SystemExit(f"ERROR: target file was not created correctly: {target_file}")
