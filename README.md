@@ -163,4 +163,3 @@ For more details about each configuration, refer to:
 - `src/ghmclip/utils/config.py`
 
 You can modify the provided shell scripts in `scripts/examples/` and `scripts/experiments/` to change training parameters as needed.
-

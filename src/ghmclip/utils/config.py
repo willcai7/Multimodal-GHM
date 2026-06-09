@@ -91,7 +91,7 @@ class LoggingConfig:
     raw: Optional[bool] = field(default=True)
     seed: Optional[int] = field(default=224)
     S3_upload: Optional[bool] = field(default=False)
-    S3_bucket_name: Optional[str] = field(default='yuhangbucket')
+    S3_bucket_name: Optional[str] = field(default='bucket')
 
 @dataclass 
 class UtilConfig(LoggingConfig, OptimizerConfig):
