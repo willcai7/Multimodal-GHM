@@ -19,12 +19,15 @@ import wandb
 # Generate the Config class for the training script
 @dataclass 
 class TrainingConfig(UtilConfig, DoubleTreeConfig, ModelConfig):
+    """CLI configuration for sequential conditional denoising training."""
+
     clip_feature: Optional[str] = field(default='GT')
     job_name: Optional[str] = field(default='Sequential_CDNS')
 
 parser = HfArgumentParser(TrainingConfig)
 config = parser.parse_args_into_dataclasses()[0]
 config_dict = vars(config)
+# Promote CLI fields to local names so experiment shell flags remain readable.
 locals().update(config_dict)
 
 if torch.cuda.is_available():
@@ -37,6 +40,8 @@ d_model = n_itree_child**n_itree_layer+1
 d_i_model = d_model-1
 # Model 
 timestamp = time.strftime('%Y%m%d-%H%M%S', time.localtime())
+# Sequential CDM reuses the same tree folder naming as CLIP so it can locate
+# the pretrained CLIP text encoder for the matching data distribution.
 tree_folder = f'K{K}_L{n_ttree_layer}C{n_ttree_child}p{int(p_ttree_flip*100)}_L{n_itree_layer}C{n_itree_child}p{int(p_itree_flip*100)}sc{int(flip_scale*10)}'
 model_name = f'L{n_model_layer}H{n_head}D{d_eb}'
 tags=[job_name, tree_folder]
@@ -54,6 +59,7 @@ else:
 directory = os.path.join("./logs", job_name, tree_folder, model_name, timestamp) 
 logger = GenLogger(directory, config, raw=raw)
 if not raw:
+    # raw=False writes the checkpoint consumed by figure evaluation scripts.
     wandb.init(project=wandb_project, name = timestamp + '-' + model_name, tags=tags, dir=wandb_path)
     wandb.config.update(asdict(config)) 
     checkpoint_path = os.path.join(directory, 'checkpoint.pth')
@@ -77,6 +83,8 @@ if not raw:
 
 # Model 
 
+# Build the CLIP text encoder with the architecture expected by released CLIP
+# checkpoints, then load the matching checkpoint from logs/CLIP.
 clip_text_model =  EncoderTransformer(n_token=d_tmodel,
                             num_class=variable_type,
                             n_embd=128,
@@ -94,6 +102,7 @@ clip_text_model =  EncoderTransformer(n_token=d_tmodel,
 clip_path = os.path.join("logs", "CLIP", tree_folder)
 model_folders = os.listdir(clip_path)
 for folder in model_folders:
+    # Choose either guided or standard CLIP features according to clip_feature.
     if "GT" in folder and clip_feature == "GT":
     # if "TF" in folder and "L5" in folder:
         clip_path = os.path.join(clip_path, folder)
@@ -125,7 +134,7 @@ model = ConditionalDenoiseEncoderTransformer(n_token=d_model,
                             guide=guide)
 model = model.to(device)
 
-# Loss an optimizer
+# Loss and optimizer
 loss = ConditionalGuidedLsLoss(penalty=penalty, guide=guide)
 loss_nop = LsLoss()
 optimizer = AdamW(params=model.parameters(), lr=None)
@@ -150,6 +159,8 @@ total_iter = 1
 while iter_num < total_iters: 
     optimizer.zero_grad() 
     res_text, res_image = sampler.get_batch(device=device, batch_size=batch_size, guide=guide)
+    # The frozen CLIP text encoder compresses text leaves into a one-token
+    # feature used as the conditioning signal for sequential denoising.
     clip_text_output = clip_text_model(res_text[0])[0].unsqueeze(1)
     guided_layers = [[clip_text_output,clip_text_output], res_image[2]]
     posterior = torch.tensor(res_image[3], dtype=torch.float32).to(device)
@@ -182,6 +193,7 @@ while iter_num < total_iters:
                         
     
     if iter_num % eval_interval == 0 and not raw:
+        # Save training histories and Bayes baseline for downstream risk plots.
         torch.save({'model_state_dict': model.state_dict(), 'optimizer_state_dict': optimizer.state_dict(), 
                 'loss': loss, 'iter': iter_num, 'loss_history':loss_history, 'ploss_history':ploss_history, 'bayes':Bayes_loss}, checkpoint_path)
     iter_num += 1

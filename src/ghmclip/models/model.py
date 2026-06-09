@@ -1,3 +1,5 @@
+"""Neural network modules and losses used by Multimodal-GHM experiments."""
+
 import torch
 import torch.nn as nn
 import numpy as np
@@ -8,6 +10,9 @@ import os
 
 
 def seed_everything(seed: int):
+    """Seed Python, NumPy, and PyTorch for reproducible training runs."""
+    # Keep all random number generators aligned so checkpoints and figure-data
+    # scripts can be reproduced from the same seed.
     random.seed(seed)
     os.environ['PYTHONHASHSEED'] = str(seed)
     np.random.seed(seed)
@@ -17,7 +22,9 @@ def seed_everything(seed: int):
     torch.backends.cudnn.benchmark = True
 
 def generate_mask(n_token, n_i_token, batch_size, device='cpu'):
-    # generate mask for auto-regressive model
+    """Create the attention mask used by image-conditioned autoregressive models."""
+    # Image tokens can attend within the image prefix; text tokens are causal.
+    # The mask is broadcast over the batch and added to attention logits.
     n_t_token = n_token - n_i_token
     mask = torch.zeros(n_token, n_token).to(device)
     mask[:n_i_token, n_i_token:] = float('-inf')
@@ -26,6 +33,8 @@ def generate_mask(n_token, n_i_token, batch_size, device='cpu'):
     return mask
 
 class RMSNorm(nn.Module):
+    """Root-mean-square normalization with a learned scale."""
+
     def __init__(self, d_model: int, epsilon: float=1e-5):
         super(RMSNorm, self).__init__()
         self.d_model = d_model
@@ -33,15 +42,21 @@ class RMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(d_model))
     
     def forward(self, x: torch.FloatTensor) -> torch.FloatTensor:
+        """Normalize the final tensor dimension by its RMS value."""
         rms_x = torch.sqrt(torch.square(x).mean(dim = -1, keepdim = True) + self.eps)
         x = x / rms_x * self.weight
         return x
 
 class GELU(nn.Module): 
+    """Gaussian error linear unit activation."""
+
     def forward(self, x: torch.FloatTensor) -> torch.FloatTensor:
+        """Apply the exact GELU formula."""
         return 0.5 * x * (1 + torch.erf(x / np.sqrt(2)))
     
 class FFN(nn.Module):
+    """Two-layer feed-forward network used inside residual blocks."""
+
     def __init__(self, d_model: int, d_ff: int):
         super(FFN, self).__init__()
         self.w1 = nn.Linear(d_model, d_ff, bias=False)
@@ -49,12 +64,15 @@ class FFN(nn.Module):
         self.gelu = GELU()
     
     def forward(self, x: torch.FloatTensor) -> torch.FloatTensor:
+        """Apply linear, GELU, and linear projections."""
         x = self.w1(x)
         x = self.gelu(x)
         x = self.w2(x)
         return x
 
 class ResNetBlock(nn.Module):
+    """RMSNorm, feed-forward, dropout, and residual connection block."""
+
     def __init__(self, d_model: int, d_ff: int, residual_pdrop: float | None = None):
         super(ResNetBlock, self).__init__()
         self.d_model = d_model
@@ -66,10 +84,13 @@ class ResNetBlock(nn.Module):
         self.drop = nn.Dropout(residual_pdrop)
 
     def forward(self, x: torch.FloatTensor) -> torch.FloatTensor:
+        """Return the residual block output."""
         return x + self.drop(self.ffn(self.ln(x)))
 
 
 class ResNet(nn.Module): 
+    """Simple residual MLP baseline over continuous inputs."""
+
     def __init__(self, d_model: int, d_ff: int, num_layers: int, num_classes:int, residual_pdrop: float | None):
         super(ResNet, self).__init__()
         self.d_model = d_model
@@ -86,6 +107,7 @@ class ResNet(nn.Module):
             self.rn_head = nn.Linear(d_model, num_classes, bias=False)
 
     def forward(self, x) -> torch.FloatTensor:
+        """Run the residual MLP and output class logits."""
         x = x.to(torch.float)        # x = self.token_embeddings(x)
         for layer in self.layers:
             x = layer(x)
@@ -97,6 +119,7 @@ class ResNet(nn.Module):
 
 
 def get_activation(activation="softmax"): # get activation function
+    """Resolve the attention activation by name."""
     if activation == "relu":
         return F.relu
     if activation == "gelu":
@@ -107,6 +130,8 @@ def get_activation(activation="softmax"): # get activation function
         raise NotImplementedError
 
 class AutoRegressiveTransformer(nn.Module):
+    """Image-conditioned autoregressive transformer for next-word prediction."""
+
     def __init__(self, n_token=9,n_i_token=4, 
                 num_class=10, 
                 n_embd=128, 
@@ -147,6 +172,8 @@ class AutoRegressiveTransformer(nn.Module):
         self.guide = guide # whether to use guided layer
         self.n_t_guided_layer =  n_guided_layers[0] # number of tmodel guided layers
         self.n_i_guided_layer =  n_guided_layers[1]
+        # Guided layers are evenly spaced so each supervised neural layer can
+        # correspond to a stage of the exact BP computation.
         self.guided_layer_gap = n_layer // (n_guided_layers[0]*2 +1) # guided layer gap 
 
 
@@ -179,6 +206,9 @@ class AutoRegressiveTransformer(nn.Module):
             self._lns_2.append(nn.LayerNorm([self.n_embd]))
 
             if guide and guided_layer_counter<(self.n_t_guided_layer*2+1) and (i+1) % self.guided_layer_gap == 0: # guided layer flag initialization
+                # Text guidance has downward, root, and upward BP stages. Image
+                # guidance may use fewer stages, so the flag logic aligns the
+                # shorter side with comparable layers.
                 self.t_guided_layer_flag[i] = True
                 if guided_layer_counter < self.n_i_guided_layer:
                     self.i_guided_layer_flag[i] = True
@@ -191,15 +221,20 @@ class AutoRegressiveTransformer(nn.Module):
         self._out = nn.Linear(n_token, 1) #output layer 
 
     def token_embeddings(self, xt, zi):
+        """Build concatenated image/text token embeddings."""
 
         embeddings = torch.zeros(zi.size(0), zi.size(1) + xt.size(1), self.n_embd).to(zi.device)
         if self.sequential:
+            # Sequential VLM/CDM consumes a frozen CLIP feature as the image
+            # prefix. Pad it to the transformer embedding dimension.
             num_zero_columns = self.n_embd - self.vocab_size 
             zeros_mat = torch.zeros(zi.size(0),zi.size(1), num_zero_columns).to(zi.device)
             x2 = torch.cat([zi, zeros_mat], dim=2)
             # print(x2.shape)
             embeddings[:, 0,:] = x2[:,0,:]
         else: 
+            # Joint training receives discrete image tokens and learns an image
+            # embedding table directly.
             x2 = self.i_embedding(zi)
             embeddings[:, :self.n_i_token,:] = x2
         
@@ -207,6 +242,7 @@ class AutoRegressiveTransformer(nn.Module):
         return embeddings
 
     def forward(self, xt, zi):
+        """Predict text tokens from text prefix tokens and image context tokens."""
         contract_dim = 1 # contract dimension
         B,T1 = xt.size() # batch size and position size
         T2 = zi.size(1) # batch size and position size
@@ -217,6 +253,8 @@ class AutoRegressiveTransformer(nn.Module):
         # print(self.token_embeddings(xt, zi).shape)
         # print(self.position_embeddings(positions).shape)
         H = self.token_embeddings(xt, zi) + self.position_embeddings(positions) # token embeddings + position embeddings 
+        # These offsets slice different BP message blocks out of hidden states
+        # when guided training is active.
         guided_counter = 0 # guided layer counter
         index_q = 0 # index of hd 
         index_h = (self.n_t_guided_layer+1)*self.vocab_size # index of qd
@@ -241,6 +279,8 @@ class AutoRegressiveTransformer(nn.Module):
             attn_weights = torch.matmul(query, key.transpose(-2, -1)) 
             if self.auto_regressive:
                 # print(self.mask.shape)
+                # Causal masking prevents a text position from seeing future
+                # text tokens while preserving access to image context.
                 attn_weights += self.mask
             if self.normalize_attn: # normalize attention weights
                 attn_weights = attn_weights / np.sqrt(self.n_embd)
@@ -261,8 +301,9 @@ class AutoRegressiveTransformer(nn.Module):
                     H = H + mlp(H)
             
             if self.guide and t_guided_layer_flag: # guided layer
-                
-                if guided_counter == 0: # leave nodes 
+                # The text guide tensors are ordered to match BP stages:
+                # leaf q messages, internal h/q messages, then upward u messages.
+                if guided_counter == 0: # leaf-node guide
                     q_H = H[:,self.n_i_token:, index_q: index_q+self.vocab_size] # qd
                     index_q += self.vocab_size # update index_q
                     guide_output = q_H
@@ -283,6 +324,7 @@ class AutoRegressiveTransformer(nn.Module):
                 t_guided_layers.append(guide_output)
             
             if self.guide and i_guided_layer_flag: 
+                # Image guidance uses the corresponding image-prefix slice.
                 i_H = H[:,:self.n_i_token, index_i: index_i+self.vocab_size] # id
                 index_i += self.vocab_size
                 i_guided_layers.append(i_H)
@@ -293,6 +335,8 @@ class AutoRegressiveTransformer(nn.Module):
         return prediction[:,self.n_i_token:,:], guided_layers   
 
 class ConditionalDenoiseEncoderTransformer(nn.Module):
+    """Transformer that denoises image leaves conditioned on text leaves."""
+
     def __init__(self, n_token,n_i_token, num_class, n_embd=128, n_layer=12, n_guided_layers=[3,3], n_head=4, n_mlp_hidden=512,
                  activation="softmax",  mlp=True, normalize_attn=True,auto_regressive=False,
                 sequential=False, layernorm=True, maxnorm=False, guide=False, sigma=1):
@@ -323,6 +367,8 @@ class ConditionalDenoiseEncoderTransformer(nn.Module):
         self.guide = guide # whether to use guided layer
         self.n_t_guided_layer =  n_guided_layers[0] # number of tmodel guided layers
         self.n_i_guided_layer =  n_guided_layers[1]
+        # Conditional denoising mainly supervises image-side BP messages, so
+        # spacing is based on the image-tree depth.
         self.guided_layer_gap = n_layer // (n_guided_layers[1]*2 +1) # guided layer gap 
 
 
@@ -359,6 +405,9 @@ class ConditionalDenoiseEncoderTransformer(nn.Module):
             self._lns_2.append(nn.LayerNorm([self.n_embd]))
 
             if guide and guided_layer_counter<(self.n_i_guided_layer*2+1) and (i+1) % self.guided_layer_gap == 0: # guided layer flag initialization
+                # Image guidance is always present at selected stages. Text
+                # guidance is included where the paired text tree has a
+                # matching BP stage.
                 self.i_guided_layer_flag[i] = True
                 if guided_layer_counter < self.n_t_guided_layer:
                     self.t_guided_layer_flag[i] = True
@@ -371,25 +420,33 @@ class ConditionalDenoiseEncoderTransformer(nn.Module):
         self._out = nn.Linear(n_token, 1) #output layer 
 
     def token_embeddings(self, xt, zi):
+        """Embed text leaves and continuous noisy image observations."""
 
         embeddings = torch.zeros(zi.size(0), zi.size(1) + xt.size(1), self.n_embd).to(zi.device)
 
         # print(x2.shape)
+        # Continuous noisy image leaves are encoded by squared distance to each
+        # discrete symbol, matching Gaussian log-likelihood features up to a
+        # constant offset.
         leave_options = torch.arange(0, self.vocab_size).unsqueeze(0).unsqueeze(0).expand(zi.size(0), zi.size(1), self.vocab_size).to(zi.device)
         leave_options = -torch.pow(leave_options - zi.unsqueeze(-1),2)/2
         embeddings[:,:self.n_i_token,:self.vocab_size] = leave_options
 
         if self.sequential:
+            # Sequential CDM receives a frozen CLIP text feature instead of
+            # discrete text tokens, so it is padded into the embedding width.
             num_zero_columns = self.n_embd - self.vocab_size 
             zeros_mat = torch.zeros(xt.size(0),xt.size(1), num_zero_columns).to(xt.device)
             x2 = torch.cat([xt, zeros_mat], dim=2)
             embeddings[:, self.n_i_token:,:] = x2
         else:
+            # Joint CDM learns a standard embedding table for text leaves.
             x2 = self.t_embedding(xt)
             embeddings[:, self.n_i_token:,:] = x2
         return embeddings
 
     def forward(self, xt, zi):
+        """Return denoised image predictions and optional guided-layer outputs."""
         contract_dim = 1 # contract dimension
         T1 = xt.size(1) # batch size and position size
         B, T2 = zi.size() # batch size and position size
@@ -398,6 +455,7 @@ class ConditionalDenoiseEncoderTransformer(nn.Module):
         T = T1 + T2
         positions = torch.arange(T, device=xt.device).expand(B, T) # position embeddings
         H = self.token_embeddings(xt, zi) + self.position_embeddings(positions) # token embeddings + position embeddings 
+        # Offsets are used to read BP-message-sized slices for guided losses.
         guided_counter = 0 # guided layer counter
         index_h = 0 # index of hd 
         index_q = self.n_t_guided_layer*self.vocab_size # index of qd
@@ -442,7 +500,8 @@ class ConditionalDenoiseEncoderTransformer(nn.Module):
                     H = H + mlp(H)
             
             if self.guide and i_guided_layer_flag: # guided layer
-                
+                # Image-side guides follow denoising BP order: downward h/q
+                # messages first, then upward blocks that also include u.
                 if guided_counter < self.n_i_guided_layer+1: # downward process 
                     h_H = H[:,:self.n_i_token, index_h: index_h+self.vocab_size] # hd 
                     q_H = H[:,:self.n_i_token, index_q: index_q+self.vocab_size] # qd 
@@ -461,6 +520,8 @@ class ConditionalDenoiseEncoderTransformer(nn.Module):
                 i_guided_layers.append(guide_output)
             
             if self.guide and t_guided_layer_flag: 
+                    # Text guidance provides classification-style messages that
+                    # condition the denoising model.
                     i_H = H[:,self.n_i_token:, index_i: index_i+self.vocab_size] # id
                     index_i += self.vocab_size
                     t_guided_layers.append(i_H)
@@ -471,6 +532,8 @@ class ConditionalDenoiseEncoderTransformer(nn.Module):
         return prediction[:,:self.n_i_token,0], guided_layers 
 
 class DenoiseEncoderTransformer(nn.Module):
+    """Transformer denoiser for single-tree noisy leaf observations."""
+
     def __init__(self, n_token, num_class, n_embd=128, n_layer=12, n_tree_layer=3, n_tree_child=3, n_guided_layer=3, n_head=4, n_mlp_hidden=512,
                  activation="softmax",  mlp=True, normalize_attn=True, layernorm=True, maxnorm=False, guide=False, sigma=1):
         super(DenoiseEncoderTransformer, self).__init__()
@@ -496,6 +559,8 @@ class DenoiseEncoderTransformer(nn.Module):
         # Guided training config
         self.guide = guide # whether to use guided layer
         self.n_guided_layer =  n_guided_layer # number of guided layers
+        # Single-tree denoising has downward and upward BP stages, hence the
+        # factor of two in the number of guided slots.
         self.guided_layer_gap = n_layer // (n_guided_layer*2) # guided layer gap 
 
 
@@ -537,6 +602,9 @@ class DenoiseEncoderTransformer(nn.Module):
         self._out = nn.Linear(n_token, 1) #output layer 
 
     def token_embeddings(self, x):
+        """Encode continuous noisy leaves as Gaussian-shaped class features."""
+        # The first vocab_size embedding channels are deterministic likelihood
+        # features; the remaining channels are free model capacity.
         leave_options = torch.arange(0, self.vocab_size).unsqueeze(0).unsqueeze(0).expand(x.size(0), x.size(1), self.vocab_size).to(x.device)
         leave_options = -torch.pow(leave_options - x.unsqueeze(-1),2)/2
         embeddings = torch.zeros(x.size(0), x.size(1), self.n_embd).to(x.device)
@@ -544,10 +612,13 @@ class DenoiseEncoderTransformer(nn.Module):
         return embeddings
 
     def forward(self, x):
+        """Return denoised leaf values and optional guided-layer outputs."""
         contract_dim = 1 # contract dimension
         B, T = x.size() # batch size and position size
         positions = torch.arange(T, device=x.device).expand(B, T) # position embeddings
         H = self.token_embeddings(x) + self.position_embeddings(positions) # token embeddings + position embeddings 
+        # These indices carve hidden states into h, q, and u message blocks used
+        # by guided denoising losses.
         guided_counter = 0 # guided layer counter
         index_h = 0 # index of hd 
         index_q = self.n_guided_layer*self.vocab_size # index of qd
@@ -589,7 +660,8 @@ class DenoiseEncoderTransformer(nn.Module):
                     H = H + mlp(H)
             
             if self.guide and guided_layer_flag: # guided layer
-                
+                # First half of guided layers corresponds to downward h/q
+                # messages; second half corresponds to upward h/q/u messages.
                 if guided_counter < self.n_guided_layer: # downward process 
                     h_H = H[:,:, index_h: index_h+self.vocab_size] # hd 
                     q_H = H[:,:, index_q: index_q+self.vocab_size] # qd 
@@ -616,6 +688,8 @@ class DenoiseEncoderTransformer(nn.Module):
             return prediction[:,:,0] # return prediction
 
 class EncoderTransformer(nn.Module):
+    """Encoder transformer used for CLIP, ZSC, and classification embeddings."""
+
     def __init__(self, n_token, num_class, n_embd=128, n_layer=12, n_guided_layer=3, n_head=4, n_mlp_multiplier=4,
                  activation="softmax",  mlp=True, normalize_attn=True, layernorm=True, maxnorm=False, guide=False, guide_contract=False):
         super(EncoderTransformer, self).__init__()
@@ -641,6 +715,8 @@ class EncoderTransformer(nn.Module):
         # Guided training config
         self.guide = guide # whether to use guided layer
         self.n_guided_layer =  n_guided_layer # number of guided layers
+        # Encoder guidance extracts a fixed number of intermediate hidden-state
+        # blocks to match exact classification BP messages.
         self.guided_layer_gap = n_layer // n_guided_layer # guided layer gap 
         self.guide_contract = guide_contract
 
@@ -673,6 +749,8 @@ class EncoderTransformer(nn.Module):
 
             # guided layer flag initialization
             if guide and _layer_count<self.n_guided_layer and (i+1) % self.guided_layer_gap == 0: 
+                # Mark evenly spaced layers where guided-loss targets will be
+                # taken from the hidden representation.
                 self.guided_layer_flag[i] = True
                 _layer_count += 1
 
@@ -680,6 +758,7 @@ class EncoderTransformer(nn.Module):
         self._out = nn.Linear(n_token, 1) #output layer 
 
     def forward(self, x):
+        """Encode a sequence of discrete GHM leaf tokens."""
         guide_contract_dim = 1 # guide_contract dimension
         B, T = x.size() # batch size and position size
         positions = torch.arange(T, device=x.device).expand(B, T) # position embeddings
@@ -713,6 +792,8 @@ class EncoderTransformer(nn.Module):
                 if self.n_layer * self.vocab_size >= self.n_mlp_hidden: 
                     raise ValueError("The number of layers times the vocabulary size \
                                      should be less than the number of hidden units in MLP")
+                # Slice a vocab-sized block for the current guided target. The
+                # blocks are laid out consecutively in the hidden dimension.
                 upper_H = H[:,:,_layer_count*self.vocab_size:(_layer_count+1)*self.vocab_size] # rolling output block
                 
                 guided_layers.append(upper_H) # append guided layers
@@ -728,12 +809,14 @@ class EncoderTransformer(nn.Module):
        
 
 class GuidedClassificationLoss(nn.Module):
+    """Classification loss with an optional guided-layer penalty."""
 
     def __init__(self, penalty: float = 0.1):
         super(GuidedClassificationLoss, self).__init__()
         self.penalty = penalty # penalty weights
 
     def forward(self, inputs, targets):
+        """Compute cross entropy plus Frobenius penalties for guide tensors."""
         clas_input = inputs[0].view(-1, inputs[0].size(-1)) # classification input
         clas_target = targets[0].view(-1)
         loss = nn.functional.cross_entropy(clas_input, clas_target, reduction='none') # cross entropy loss
@@ -744,13 +827,18 @@ class GuidedClassificationLoss(nn.Module):
         return loss.mean() # return mean loss
 
 class ClipLoss(nn.Module):
+    """Symmetric contrastive CLIP loss for paired text/image embeddings."""
+
     def __init__(self, K, batch_size):
         super(ClipLoss, self).__init__()
         self.K = K 
         self.batch_size = batch_size 
 
     def forward(self, tmodel_output, imodel_output):
+        """Compute K-way text-to-image and image-to-text contrastive loss."""
         # K text and 1 image 
+        # First direction: each image is compared against one matching text and
+        # K-1 independent text negatives.
         t_output_match = tmodel_output[:self.batch_size, :] 
         i_output_match = imodel_output[:self.batch_size, :]
         t_output_indep = tmodel_output[2*self.batch_size:, :] 
@@ -762,7 +850,8 @@ class ClipLoss(nn.Module):
         sum_S_indep = torch.matmul(S_indep, concat_mat) 
         loss1 = -torch.log(S_match / (S_match + sum_S_indep))
 
-        # K image and 1 text 
+        # Second direction: each text is compared against one matching image and
+        # K-1 independent image negatives.
         t_output_match = tmodel_output[self.batch_size:2*self.batch_size, :]
         i_output_match = imodel_output[self.batch_size:2*self.batch_size, :]
         i_output_indep = imodel_output[2*self.batch_size:, :] 
@@ -776,6 +865,8 @@ class ClipLoss(nn.Module):
         return torch.mean(loss1 + loss2)
 
 class GuidedClipLoss(nn.Module):
+    """CLIP loss with optional penalties on text and image guided layers."""
+
     def __init__(self, K, batch_size, penalty=1e-4, guide=False):
         super(GuidedClipLoss, self).__init__()
         self.K = K 
@@ -784,10 +875,12 @@ class GuidedClipLoss(nn.Module):
         self.guide = guide
 
     def forward(self, tmodel_outputs, imodel_outputs, targets):
+        """Compute contrastive loss and, when enabled, guide matching loss."""
 
         tmodel_output = tmodel_outputs[0]
         imodel_output = imodel_outputs[0]
         # K text and 1 image 
+        # This batch layout mirrors ClipSampler.get_batch and PPCLIPLoss.
         t_output_match = tmodel_output[:self.batch_size, :] 
         i_output_match = imodel_output[:self.batch_size, :]
         t_output_indep = tmodel_output[2*self.batch_size:, :] 
@@ -815,6 +908,8 @@ class GuidedClipLoss(nn.Module):
 
         loss3 = 0
         if self.guide:
+            # Guided CLIP adds layer-wise Frobenius penalties toward exact BP
+            # messages for both text and image encoders.
             tguided_input = tmodel_outputs[1]
             iguided_input = imodel_outputs[1]
             tguided_target = targets[0]
@@ -833,6 +928,7 @@ class GuidedClipLoss(nn.Module):
 
 
 class SoftmaxClipLoss(nn.Module):
+    """CLIP loss after converting embeddings to probability vectors."""
 
     def __init__(self, K, batch_size):
         super(SoftmaxClipLoss, self).__init__()
@@ -840,8 +936,11 @@ class SoftmaxClipLoss(nn.Module):
         self.batch_size = batch_size 
     
     def forward(self, tmodel_output, imodel_output):
+        """Compute symmetric contrastive loss on softmax-normalized outputs."""
 
         # softmax 
+        # This variant treats model outputs as class probabilities before
+        # computing the same symmetric contrastive objective.
         tmodel_output = F.softmax(tmodel_output, dim=1) 
         imodel_output = F.softmax(imodel_output, dim=1)
 
@@ -870,11 +969,14 @@ class SoftmaxClipLoss(nn.Module):
         return torch.mean(loss1 + loss2)
 
 class GuidedLsLoss(nn.Module):
+    """Least-squares denoising loss with guided-layer penalties."""
+
     def __init__(self,  penalty=1e-4):
         super(GuidedLsLoss, self).__init__()
         self.penalty = penalty
 
     def forward(self, inputs, targets):
+        """Compute MSE plus guide-matching penalties."""
         loss = torch.sum(torch.pow(inputs[0] - targets[0], 2), dim=1)
         guided_input = inputs[1]
         guided_target = targets[1]
@@ -885,12 +987,15 @@ class GuidedLsLoss(nn.Module):
         return loss.mean() +loss3.mean()
     
 class ConditionalGuidedLsLoss(nn.Module):
+    """Conditional denoising MSE with separate text/image guide penalties."""
+
     def __init__(self,  penalty=1e-4, guide=False):
         super(ConditionalGuidedLsLoss, self).__init__()
         self.penalty = penalty
         self.guide = guide
 
     def forward(self, inputs, targets, verbose=False):
+        """Return total MSE and individual guide penalty diagnostics."""
         loss = torch.sum(torch.pow(inputs[0] - targets[0], 2), dim=1)
         loss2 = 0
         loss3 = 0
@@ -916,6 +1021,8 @@ class ConditionalGuidedLsLoss(nn.Module):
 
 
         if self.guide:
+            # Split image-side penalties into downward, root, and upward groups
+            # so training logs can diagnose which BP stage is hardest to match.
             guided_input = inputs[1][1]
             guided_target = targets[1][1]
             for i in range(len(guided_input)//2):
@@ -936,12 +1043,15 @@ class ConditionalGuidedLsLoss(nn.Module):
 
 
 class GuidedCELoss(nn.Module):
+    """Cross-entropy loss with an optional guided-layer penalty."""
+
     def __init__(self,  penaltys, guide=False):
         super().__init__()
         self.penaltys = penaltys
         self.guide = guide
 
     def forward(self, inputs, targets):
+        """Compute weighted CE and optional guide matching."""
         loss = self.penaltys[0]*nn.functional.cross_entropy(inputs[0], targets[0], reduction='none') # cross entropy loss
 
         if self.guide:
@@ -955,22 +1065,28 @@ class GuidedCELoss(nn.Module):
         return loss.mean()
 
 class KLdiv(nn.Module):
+    """KL divergence from model logits to target probability distributions."""
+
     def __init__(self):
         super(KLdiv, self).__init__()
     
     def forward(self, inputs, targets):
+        """Compute batch-mean KL divergence after log-softmaxing inputs."""
         inputs = inputs.reshape(-1, inputs.size(-1))
         targets = targets.reshape(-1, targets.size(-1))
         inputs = F.log_softmax(inputs, dim=1)
         return nn.functional.kl_div(inputs, targets, reduction='batchmean')
 
 class ConditionalGuidedCELoss(nn.Module):
+    """Sequence cross-entropy with separate text/image guide penalties."""
+
     def __init__(self,  penalty=1e-4, guide=False):
         super().__init__()
         self.penalty = penalty
         self.guide = guide
 
     def forward(self, inputs, targets, verbose=False):
+        """Return total CE and individual guide penalty diagnostics."""
         clas_inputs = inputs[0].reshape(-1, inputs[0].size(-1)) # classification input
         # print(clas_inputs.shape)
         clas_targets = targets[0].reshape(-1)
@@ -1004,6 +1120,8 @@ class ConditionalGuidedCELoss(nn.Module):
 
 
         if self.guide:
+            # Text and image guide penalties are logged separately to make the
+            # VLM/CDM training curves easier to interpret.
             guided_input = inputs[1][0]
             guided_target = targets[1][0]
             # print(guided_input[0].shape)
@@ -1032,13 +1150,17 @@ class ConditionalGuidedCELoss(nn.Module):
         
 
 class LsLoss(nn.Module):
+    """Mean squared error over predicted leaf values."""
+
     def __init__(self):
         super(LsLoss, self).__init__()
     
     def forward(self, inputs, targets):
+        """Compute average squared error across leaves."""
         return torch.sum(torch.pow(inputs - targets, 2), dim=1).mean()
     
 class GuidedSoftmaxClipLoss(nn.Module):
+    """Softmax CLIP loss with guided-layer penalties."""
 
     def __init__(self, K, batch_size, penalty=1e-4):
         super(GuidedSoftmaxClipLoss, self).__init__()
@@ -1047,6 +1169,7 @@ class GuidedSoftmaxClipLoss(nn.Module):
         self.penalty = penalty
     
     def forward(self, tmodel_outputs, imodel_outputs, targets):
+        """Compute softmax contrastive loss plus guide matching."""
 
         tmodel_output = tmodel_outputs[0]
         imodel_output = imodel_outputs[0]

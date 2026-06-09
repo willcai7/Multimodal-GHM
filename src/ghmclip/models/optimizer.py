@@ -1,3 +1,5 @@
+"""Lightweight optimizer implementations and learning-rate schedules."""
+
 from collections.abc import Callable, Iterable 
 from typing import Optional
 import torch
@@ -5,6 +7,8 @@ import math
 import numpy as np
 
 class SGD(torch.optim.Optimizer):
+    """SGD with an inverse-square-root iteration decay."""
+
     def __init__(self, params, lr=1e-3):
         if lr < 0:
             raise ValueError(f"Invalid learning rate: {lr}")
@@ -12,6 +16,7 @@ class SGD(torch.optim.Optimizer):
         super().__init__(params, defaults)
 
     def step(self, closure: Optional[Callable] = None): 
+        """Update parameters once and return the optional closure loss."""
         loss = None if closure is None else closure() 
         for group in self.param_groups:
             lr = group["lr"] # Get the learning rate. 
@@ -27,15 +32,19 @@ class SGD(torch.optim.Optimizer):
     
 
 class AdamW(torch.optim.Optimizer):
+    """AdamW optimizer with explicit runtime learning-rate updates."""
+
     def __init__(self, params, lr=None, weight_decay=0.001, betas=(0.9, 0.999), eps=1e-8, **kwargs):
         defaults = dict(lr=lr, weight_decay=weight_decay, betas=betas, eps=eps)
         super().__init__(params, defaults)
 
     def set_lr(self, lr):
+        """Set the learning rate for all parameter groups."""
         for group in self.param_groups:
             group['lr'] = lr
 
     def step(self, closure: Optional[Callable] = None): 
+        """Apply one AdamW update using decoupled weight decay."""
         loss = None if closure is None else closure() 
         for group in self.param_groups:
             lr = group["lr"] 
@@ -67,6 +76,7 @@ class AdamW(torch.optim.Optimizer):
     
 
 def get_lr_cosine_schedule(t, lr_max, lr_min, warmup_iters, total_iters, **kwargs):
+    """Return the warmup-plus-cosine learning rate at iteration ``t``."""
     if t < warmup_iters:
         return lr_max * t / warmup_iters
     elif t < total_iters:

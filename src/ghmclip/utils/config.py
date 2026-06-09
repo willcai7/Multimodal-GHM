@@ -1,8 +1,12 @@
+"""Dataclass configuration blocks shared by training entry points."""
+
 from dataclasses import dataclass, field, asdict
 from typing import Optional, Iterable
 
 @dataclass 
 class TreeConfig:
+    """Configuration for one GHM tree used by single-modality tasks."""
+
     n_tree_layer: Optional[int] = field(default=3)
     n_tree_child: Optional[int] = field(default=4)
     p_tree_flip: Optional[float] = field(default=0.10)
@@ -15,6 +19,8 @@ class TreeConfig:
 
 @dataclass
 class DoubleTreeConfig:
+    """Configuration for paired text/image GHM trees."""
+
     n_ttree_layer: Optional[int] = field(default=3)
     n_itree_layer: Optional[int] = field(default=3)
     n_ttree_child: Optional[int] = field(default=4)
@@ -30,6 +36,8 @@ class DoubleTreeConfig:
 
 @dataclass 
 class ModelConfig:
+    """Transformer architecture configuration for single-model tasks."""
+
     model_type: Optional[str] = field(default='TF')
     n_model_layer: Optional[int] = field(default=10)
     d_eb: Optional[int] = field(default=64)
@@ -42,6 +50,8 @@ class ModelConfig:
 
 @dataclass 
 class ClipModelConfig:
+    """Separate text/image transformer configuration for CLIP training."""
+
     clip_model_type: Optional[str] = field(default='TF')
     clip_tmodel_nlayer: Optional[int] = field(default=10)
     clip_imodel_nlayer: Optional[int] = field(default=10)
@@ -57,6 +67,8 @@ class ClipModelConfig:
 
 @dataclass
 class OptimizerConfig:
+    """Optimizer, schedule, penalty, and checkpoint-resume settings."""
+
     lr_max: Optional[float] = field(default=5e-4)
     lr_min: Optional[float] = field(default=5e-6)
     warmup_iters: Optional[int] = field(default=0)
@@ -68,6 +80,8 @@ class OptimizerConfig:
 
 @dataclass
 class LoggingConfig:
+    """Logging, WandB, random seed, and optional S3 upload settings."""
+
     log_interval: Optional[int] = field(default=20)
     eval_interval: Optional[int] = field(default=200)
     eval_iters: Optional[int] = field(default=1200)
@@ -81,5 +95,7 @@ class LoggingConfig:
 
 @dataclass 
 class UtilConfig(LoggingConfig, OptimizerConfig):
+    """Common runtime configuration inherited by training scripts."""
+
     device: Optional[str] = field(default='cuda')
 

@@ -1,5 +1,5 @@
 """
-Train the next word prediction tasks.
+Train a classifier on GHM leaf observations.
 """
 import os 
 import sys
@@ -16,11 +16,14 @@ from ghmclip.utils import *
 # Generate the Config class for the training script
 @dataclass 
 class TrainingConfig(UtilConfig, TreeConfig, ModelConfig):
+    """CLI configuration for the classification training entry point."""
+
     job_name: Optional[str] = field(default='classification')
 
 parser = HfArgumentParser(TrainingConfig)
 config = parser.parse_args_into_dataclasses()[0]
 config_dict = vars(config)
+# Keep the original script style where config fields become local variables.
 locals().update(config_dict)
 
 # CUDA device
@@ -32,6 +35,8 @@ if torch.cuda.is_available():
 d_model = n_tree_child**n_tree_layer
 # Model 
 timestamp = time.strftime('%Y%m%d-%H%M%S', time.localtime())
+# Classification uses the single-tree naming convention rather than paired
+# text/image tree names.
 tree_folder = f'L{n_tree_layer}C{n_tree_child}p{int(p_tree_flip*100)}'
 model_name = f'L{n_model_layer}H{n_head}D{d_eb}'
 tags=[job_name, tree_folder]
@@ -45,6 +50,7 @@ else:
 directory = os.path.join("./logs", job_name, tree_folder, model_name, timestamp) 
 logger = GenLogger(directory, config, raw=raw)
 if not raw:
+    # raw=False enables checkpointing and WandB logging.
     wandb.init(project=wandb_project, name = timestamp + '-' + model_name, tags=tags, dir=wandb_path)
     wandb.config.update(asdict(config)) 
     checkpoint_path = os.path.join(directory, 'checkpoint.pth')
@@ -52,6 +58,8 @@ if not raw:
 # sampler 
 
 p_y = np.ones(variable_type) / variable_type 
+# The currently active sampler block below uses paired-tree samples while the
+# commented block shows the original single-tree classification sampler.
 # sampler = ClassificationSampler(n_layer=n_tree_layer, 
 #                                 n_child=n_tree_child,
 #                                 p_y=p_y, 
@@ -97,7 +105,7 @@ model = EncoderTransformer(n_token=d_model,
                            guide=guide, 
                            activation="softmax")
 model = model.to(device)
-# Loss an optimizer
+# Loss and optimizer
 # loss = LsLoss()
 penaltys = [0,penalty]
 loss = GuidedCELoss(penaltys=penaltys,guide=guide)
@@ -123,6 +131,8 @@ total_iter = 1
 # total_iters= 2
 while iter_num < total_iters: 
     optimizer.zero_grad() 
+    # Re-sample synthetic data every iteration rather than iterating over a
+    # fixed dataset.
     _, res = sampler.get_batch(device=device, batch_size=batch_size, guide=guide)
     out = model(res[0])
     output = loss(out, [res[1], res[2]])
@@ -149,6 +159,8 @@ while iter_num < total_iters:
                         
     
     if iter_num % eval_interval == 0 and not raw:
+        # Classification checkpoints are primarily for resuming exploratory
+        # runs; the main paper figures use CLIP/CDM/VLM checkpoints.
         torch.save({'model_state_dict': model.state_dict(), 'optimizer_state_dict': optimizer.state_dict(), 
                 'loss': loss, 'iter': iter_num}, checkpoint_path)
     iter_num += 1

@@ -3,8 +3,7 @@ export CUDA_VISIBLE_DEVICES=5
 # Create logs directory if it doesn't exist
 mkdir -p logs/temp
 
-# p_flip_list=(0.02 0.04 0.06 0.08 0.1 0.12 0.14 0.16 0.18 0.2 0.22 0.24 0.26 0.28 0.3 0.32 0.34 0.36 0.38 0.4)
-p_flip_list=(0.38)
+p_flip_list=(0.02 0.04 0.06 0.08 0.1 0.12 0.14 0.16 0.18 0.2 0.22 0.24 0.26 0.28 0.3 0.32 0.34 0.36 0.38 0.4)
 
 # Run all experiments in parallel
 for p_flip in "${p_flip_list[@]}"; do

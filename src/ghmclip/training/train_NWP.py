@@ -1,5 +1,5 @@
 """
-Train the next word prediction tasks.
+Train a next-token predictor conditioned on the paired image tree.
 """
 import os 
 import sys
@@ -16,11 +16,15 @@ from ghmclip.utils import *
 # Generate the Config class for the training script
 @dataclass 
 class TrainingConfig(UtilConfig, DoubleTreeConfig, ModelConfig):
+    """CLI configuration for joint next-word-prediction training."""
+
     job_name: Optional[str] = field(default='next_word_prediction')
 
 parser = HfArgumentParser(TrainingConfig)
 config = parser.parse_args_into_dataclasses()[0]
 config_dict = vars(config)
+# Promote parsed CLI fields into local variables so shell-script flags map
+# directly to the variable names below.
 locals().update(config_dict)
 
 # CUDA device
@@ -34,6 +38,7 @@ d_i_model = n_itree_child**n_itree_layer
 d_model =d_i_model + d_tmodel - 1
 # Model 
 timestamp = time.strftime('%Y%m%d-%H%M%S', time.localtime())
+# Folder names are part of the checkpoint contract used by figure evaluators.
 tree_folder = f'K{K}_L{n_ttree_layer}C{n_ttree_child}p{int(p_ttree_flip*100)}_L{n_itree_layer}C{n_itree_child}p{int(p_itree_flip*100)}sc{int(flip_scale*10)}'
 model_name = f'L{n_model_layer}H{n_head}D{d_eb}'
 tags=[job_name, tree_folder]
@@ -47,6 +52,7 @@ else:
 directory = os.path.join("./logs", job_name, tree_folder, model_name, timestamp) 
 logger = GenLogger(directory, config, raw=raw)
 if not raw:
+    # raw=False enables persistent checkpoints and WandB logs.
     wandb.init(project=wandb_project, name = timestamp + '-' + model_name, tags=tags, dir=wandb_path)
     wandb.config.update(asdict(config)) 
     checkpoint_path = os.path.join(directory, 'checkpoint.pth')
@@ -54,6 +60,8 @@ if not raw:
 # sampler 
 
 p_y = np.ones(variable_type) / variable_type 
+# The sampler returns image leaves plus shifted text sequences for
+# autoregressive next-token prediction.
 sampler = NextWordPredictSampler([n_ttree_layer, n_itree_layer], 
                                 [n_ttree_child, n_itree_child], 
                                 [p_y, p_y], 
@@ -64,6 +72,7 @@ sampler = NextWordPredictSampler([n_ttree_layer, n_itree_layer],
                                 seedtree=42)
 
 Bayes_loss, Bayes_std = sampler.get_Bayes(n_eval=10000)
+# The Bayes cross-entropy is the exact posterior baseline plotted in figures.
 logger.info(f'Bayes Loss: {Bayes_loss}, Bayes Std: {Bayes_std}')
 if not raw:
     wandb.log({'Bayes_loss': Bayes_loss, 'Bayes_std': Bayes_std})
@@ -87,7 +96,7 @@ model = AutoRegressiveTransformer(n_token=d_model,
                                 guide=guide)
 model = model.to(device)
 # print(model.i_guided_layer_flag)
-# Loss an optimizer
+# Loss and optimizer
 # loss = LsLoss()
 loss = ConditionalGuidedCELoss(penalty=penalty,guide=guide)
 loss_nop = ConditionalGuidedCELoss(penalty=0,guide=False)
@@ -96,6 +105,8 @@ optimizer = AdamW(params=model.parameters(), lr=None)
 ploss_history = np.zeros(total_iters)
 loss_history = np.zeros(total_iters)
 compare_history = np.zeros(total_iters)
+# compare_history tracks KL to the exact BP posterior, not just CE to sampled
+# next tokens.
 
 # loading from checkpoint
 if init_from != 'scratch':
@@ -113,10 +124,13 @@ total_iter = 1
 # total_iters= 2
 while iter_num < total_iters: 
     optimizer.zero_grad() 
+    # Generate a fresh paired-tree batch and optional exact BP guide targets.
     res_text, res_image = sampler.get_batch(device=device, batch_size=batch_size, guide=guide)
     guided_layers = [res_text[-2], res_image[-2]]
     posterior = res_text[-1].to(device)
     
+    # Autoregressive transformer predicts each next text leaf using text prefix
+    # plus the full image context.
     out = model(res_text[0], res_image[0])
 
     
@@ -147,6 +161,8 @@ while iter_num < total_iters:
                         
     
     if iter_num % eval_interval == 0 and not raw:
+        # Checkpoints include compare_history because VLM diagnostics compare
+        # neural predictions with the exact posterior distribution.
         torch.save({'model_state_dict': model.state_dict(), 'optimizer_state_dict': optimizer.state_dict(), 
                 'loss': loss, 'iter': iter_num, 'loss_history':loss_history, 'ploss_history':ploss_history, 'bayes':Bayes_loss, 'compare':compare_history}, checkpoint_path)
     iter_num += 1

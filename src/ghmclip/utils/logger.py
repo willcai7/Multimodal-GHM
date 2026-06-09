@@ -1,8 +1,12 @@
+"""Logging helpers for local and WandB-backed training runs."""
+
 import logging 
 import os 
 from dataclasses import asdict
 
 def GenLogger(directory,config, raw=True):
+    """Create the root logger and optionally attach config/training log files."""
+
     config_file_path = os.path.join(directory, 'config.log') # path to save the configuration file
     log_file_path = os.path.join(directory, 'training.log') # path to save the log file    
     logger = logging.getLogger() # logger object

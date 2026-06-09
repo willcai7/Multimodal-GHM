@@ -5,6 +5,7 @@ src/ghmclip/__init__.py
 src/ghmclip.egg-info/PKG-INFO
 src/ghmclip.egg-info/SOURCES.txt
 src/ghmclip.egg-info/dependency_links.txt
+src/ghmclip.egg-info/requires.txt
 src/ghmclip.egg-info/top_level.txt
 src/ghmclip/data/__init__.py
 src/ghmclip/data/data_random_GHM.py

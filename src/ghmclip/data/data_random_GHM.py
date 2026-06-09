@@ -1,5 +1,5 @@
 """
-Code for generating random data using the Gnerative Hierarchical Model (GHM). 
+Sampling and exact-inference utilities for the Generative Hierarchical Model (GHM).
 """
 
 # Modules
@@ -11,19 +11,23 @@ from tqdm import tqdm
 # Functions 
 
 def PPCLIPLoss(t_pp, i_pp, n_eval, K=4, variable_type=10):
-        # K imdage and 1 text 
+        """Compute the Bayes CLIP objective from text/image posterior probabilities."""
+        # K images and 1 text.
+        # The first n_eval samples are matched text/image pairs. The remaining
+        # samples are arranged as negatives, so the block reduction below folds
+        # each K-1 negative set back onto its matching example.
         t_pp_match = t_pp[:, :n_eval] 
         i_pp_match = i_pp[:, :n_eval] 
         t_pp_indep = t_pp[:, 2*n_eval:] 
 
-        # compute S 
+        # Compute Bayes similarity scores from posterior inner products.
         S_match = np.sum(t_pp_match * i_pp_match, 0) *variable_type
         S_indep = np.sum(t_pp_indep * np.tile(i_pp_match, (1,K-1)),0)
         concat_mat = np.kron(np.ones([K-1,1]), np.eye(n_eval))
         S_indep = S_indep.dot(concat_mat)*variable_type 
         S = -np.log(S_match/(S_indep + S_match)) 
 
-        # K text and 1 image 
+        # K texts and 1 image.
         t_pp_match = t_pp[:, n_eval: 2*n_eval] 
         i_pp_match = i_pp[:, n_eval: 2*n_eval]
         i_pp_indep = i_pp[:, 2*n_eval:] 
@@ -61,6 +65,9 @@ def GenTransition(n_layer,
     if verbose:
         skeleton = []
     if translation_invariance: 
+        # Translation-invariant trees reuse the same child transition templates
+        # at every node in a layer. This keeps the statistical structure fixed
+        # across positions while still sampling a new skeleton per layer.
         for layer in range(n_layer):
             skeleton_matrix =  np.identity(variable_type)[np.random.permutation(variable_type), :]
             invariance_transition = [(1 - p_flip) * skeleton_matrix + \
@@ -70,6 +77,8 @@ def GenTransition(n_layer,
             if verbose:
                 skeleton.append(skeleton_matrix)
     else:
+        # Non-invariant trees sample a separate transition matrix for every
+        # edge, which is useful for stress tests with position-specific noise.
         for layer in range(n_layer):
             for _ in range(n_child ** layer):
                 transition[layer].extend([(1 - p_flip) * np.identity(variable_type)[np.random.permutation(variable_type), :] + \
@@ -90,7 +99,7 @@ def _softmax_row(x = np.array([[]])):
 
 class Node:
     """
-    Node class for the GHM tree.
+    Lightweight node used when running tree-structured belief propagation.
     """
     def __init__(self, value = None, 
                  parent = None, 
@@ -102,7 +111,7 @@ class Node:
 
 class GHMTree:
     """
-    GHM tree class.
+    Concrete sampled GHM tree plus exact belief-propagation routines.
     """
     def __init__(self, 
                  n_layer=4, 
@@ -137,8 +146,13 @@ class GHMTree:
         """
         Generate values for the tree.
         """
+        # T_value[layer][node_id] stores a batch of sampled values for one
+        # node. Nodes are sampled breadth-first so transition indices align
+        # with the same breadth-first convention used by BP methods.
         self.T_value = [[] for _ in range(self.n_layer + 1)]
         if self.root is not None: 
+            # Paired text/image tasks pass a shared root so both modalities
+            # describe the same latent class.
             self.T_value[0].append(self.root)
         else:
             self.T_value[0].append(np.random.choice(self.variable_type, 
@@ -154,6 +168,8 @@ class GHMTree:
         """
         Build the tree and store the values into the nodes. 
         """
+        # Sampling only needs T_value. Exact inference additionally needs
+        # parent/child links so messages can move up and down the tree.
         self.posterior_probability_CLS = None 
         self.posterior_mean_DNS = None 
         self.Tree = [[] for _ in range(self.n_layer+1)]
@@ -170,7 +186,8 @@ class GHMTree:
         """
         Belief propagation for classification.
         """
-        # generate message for the L-1 layer nodes 
+        # Start from observed leaves. Each depth L-1 node receives one
+        # log-likelihood contribution from every observed child leaf.
         for id_node in range(len(self.Tree[-2])):
             node = self.Tree[-2][id_node]
             node.hd_message = np.zeros([self.variable_type, self.batch_size])
@@ -179,7 +196,8 @@ class GHMTree:
                 node.hd_message += np.log(self.transition[-1][id_node * self.n_child + id_child][:, self.T_value[-1][id_node*self.n_child+id_child]])
             node.hd_message -= np.max(node.hd_message,0)
 
-        # generate message for layer L-2 to 0
+        # Propagate child messages up to the root in log space. The max shift
+        # preserves probabilities while preventing overflow in exp().
         for layer in range(self.n_layer-2, -1, -1):
             for id_node in range(len(self.Tree[layer])):
                 node = self.Tree[layer][id_node]
@@ -188,7 +206,8 @@ class GHMTree:
                     child = node.children[id_child]
                     node.hd_message += np.log(self.transition[layer][id_node * self.n_child + id_child] @ np.exp(child.hd_message))
                 node.hd_message -= np.max(node.hd_message, 0)
-        # final probability 
+        # Combine the root likelihood with the prior p_y to obtain
+        # p(root | all observed leaves).
 
         # self.root_node.hd_message = np.zeros([self.variable_type, self.batch_size])
         h0 = self.root_node.hd_message + np.log(self.p_y).reshape(-1,1)
@@ -207,7 +226,8 @@ class GHMTree:
         """
         
         # print("Doing BP_dummy_NWP")
-        # generate message for the leaf nodes 
+        # Treat tokens before the requested position as observed and tokens at
+        # or after the position as unknown. This gives a one-position posterior.
         vt_choices = np.linspace(0, self.variable_type - 1, self.variable_type) # possible values for the variable
         index = 0
         for id_node in range(len(self.Tree[-1])):
@@ -220,7 +240,7 @@ class GHMTree:
                 node.qd_message = np.log(self.transition[-1][id_node][:, self.T_value[-1][id_node]])
             # print("Leave:", id_node, node.qd_message.T-np.min(node.qd_message).T)
 
-        # downward process 
+        # Downward pass: collect information from the observed prefix.
         for layer in range(self.n_layer-1, 0, -1):
             for id_node in range(len(self.Tree[layer])):
                 node = self.Tree[layer][id_node]
@@ -230,7 +250,7 @@ class GHMTree:
                 # if id_node ==0:
                 #     print("Layer:",layer, id_node, node.qd_message.T-np.min(node.qd_message).T)
         
-        # Update the root node 
+        # Update the root node, optionally injecting evidence from another tree.
         self.root_node.hd_message = sum( child.qd_message 
                                                 for child in self.root_node.children)
         self.root_node.bu_message = self.root_node.hd_message 
@@ -238,7 +258,7 @@ class GHMTree:
         if external_hd_message is not None:
             self.root_node.bu_message += external_hd_message
 
-        # upward process
+        # Upward pass: send the root posterior back toward the target leaf.
         for layer in range(1, self.n_layer+1):
             for id_node in range(len(self.Tree[layer])):
                 node = self.Tree[layer][id_node]
@@ -327,12 +347,16 @@ class GHMTree:
         predict_pp: torch.tensor, posterior probability for the next word
         guided_layers: list of torch.tensor, guided information for each layer
         """
-        # generate message for the leaf nodes 
+        # Preallocate one posterior for every next-token prediction position.
+        # The sequence length is number of leaves minus one because each target
+        # predicts the next leaf from the observed prefix.
         vt_choices = np.linspace(0, self.variable_type - 1, self.variable_type) # possible values for the variable
         num_leaves = len(self.Tree[-1]) # number of leaves
         guided_layers = [] # guided information for each layer
 
         if guide_info: # Initialize the guided information 
+            # Guided training supervises hidden states with exact BP messages:
+            # leaf q messages, internal h/q messages, then upward bu messages.
             guided_layers.append(torch.tensor(np.zeros([self.batch_size,num_leaves-1, self.variable_type]), dtype=torch.float).to(device)) # guided information for the leaf nodes
             for iter in range(self.n_layer): # for layer 1 to n_layer+1, double output for hd and qd message
                 guided_layers.append(torch.tensor(np.zeros([self.batch_size,(num_leaves-1), 2*self.variable_type]), dtype=torch.float).to(device))
@@ -341,7 +365,7 @@ class GHMTree:
 
         predict_pp = torch.zeros([self.batch_size, num_leaves-1, self.variable_type]).to(device) # posterior probability for the next word
 
-        # Generate the message iteratively
+        # Generate the exact next-token posterior at each autoregressive step.
         for position in range(num_leaves-1):
             # print("Position:", position)
             id_node = position # id of the current position
@@ -360,7 +384,8 @@ class GHMTree:
             share_parents_flags = [False] # whether the current node and the goal node share the same parent
             id_goal_nodes = [position+1] # id of the goal nodes to extract transition matrix
             
-            # downward process
+            # Downward process: aggregate observed-prefix messages up to the
+            # root while tracking the ancestor path of the target leaf.
             for layer in range(self.n_layer-1, 0, -1): 
                 parent_id_node = id_node// self.n_child # id of the parent node
                 parent_node = node.parent # parent node
@@ -389,7 +414,8 @@ class GHMTree:
                 else:
                     share_parents_flags.append(False)
             
-            # Update the root node
+            # Update the root node after all available prefix evidence has
+            # reached the root.
             # self.root_node.hd_message += node.qd_message # update the hd message
             self.root_node.hd_message = 0
             for id_child in range(self.n_child): # update the hd message
@@ -398,7 +424,7 @@ class GHMTree:
             self.root_node.hd_message -= self.root_node.hd_message.max(0) # normalize the hd message
             self.root_node.bu_message = self.root_node.hd_message # update the bu message
 
-            # information from the external source
+            # Information from an external paired tree, e.g. CLIP image context.
             if external_hd_message is not None:
                 self.root_node.bu_message += external_hd_message
             if verbose and position == pos:
@@ -412,7 +438,8 @@ class GHMTree:
                 guided_layers[self.n_layer][:,position,:self.variable_type] = torch.tensor(self.root_node.hd_message.T).to(device)
                 guided_layers[self.n_layer][:, position,self.variable_type:] = torch.tensor(self.root_node.bu_message.T).to(device)
 
-            # upward process
+            # Upward process: push root evidence back down the target path to
+            # compute p(next leaf | prefix, optional external evidence).
             for layer in range(1, self.n_layer+1):
                 node = goal_node_parents[-layer]
                 if share_parents_flags[-layer]: # if the current node and the goal node share the same parent
@@ -443,11 +470,14 @@ class GHMTree:
         """
         self.posterior_mean_DNS = np.zeros(z.shape)
         
-        # generate the true transtion probability
+        # These variables describe the simple corruption model used by older
+        # diagnostics; the transition matrices below carry the actual tree
+        # probabilities used by inference.
         p_flip = self.p_flip/(self.variable_type ) 
         p_same = 1- p_flip * (self.variable_type - 1) 
 
-        # generate message for the leaf nodes 
+        # Leaf likelihood under Gaussian observation noise around each discrete
+        # symbol. This is the only place continuous noisy observations enter BP.
         vt_choices = np.linspace(0, self.variable_type - 1, self.variable_type) # possible values for the variable
         index = 0
         for id_node in range(len(self.Tree[-1])):
@@ -457,7 +487,7 @@ class GHMTree:
             node.qd_message = np.log(self.transition[-1][id_node] @ np.exp(node.hd_message))
             index += 1
 
-        # downward process 
+        # Downward pass: collect evidence from leaves to the root.
         for layer in range(self.n_layer-1, 0, -1):
             for id_node in range(len(self.Tree[layer])):
                 node = self.Tree[layer][id_node]
@@ -466,7 +496,8 @@ class GHMTree:
                 node.hd_message -= np.max(node.hd_message, 0)
                 node.qd_message = np.log(self.transition[layer-1][id_node] @ np.exp(node.hd_message)) 
         
-        # Update the root node 
+        # Root posterior can be conditioned on another tree through an external
+        # log-message, which is how conditional denoising uses text evidence.
         self.root_node.hd_message = sum( child.qd_message 
                                                 for child in self.root_node.children)
         self.root_node.hd_message -= np.max(self.root_node.hd_message, 0)
@@ -474,14 +505,14 @@ class GHMTree:
         if external_hd_message is not None:
             self.root_node.bu_message += external_hd_message
 
-        # upward process
+        # Upward pass: distribute the root posterior back to every leaf.
         for layer in range(1, self.n_layer+1):
             for id_node in range(len(self.Tree[layer])):
                 node = self.Tree[layer][id_node]
                 diff = node.parent.bu_message - node.qd_message
                 node.bu_message = node.hd_message + np.log(self.transition[layer-1][id_node].T @ np.exp(diff))
                 node.bu_message -= np.max(node.bu_message, 0)
-        # posterior mean 
+        # Convert each leaf posterior distribution into a posterior mean target.
         index = 0
         for node in self.leaves_nodes:
             self.posterior_mean_DNS[ index,:] = vt_choices.dot(np.exp(node.bu_message)) / np.sum(np.exp(node.bu_message),0)
@@ -500,7 +531,9 @@ class GHMTree:
         guided_layers = []
         extend_time = 1
         if self.cls_flag:            
-
+            # Classification guidance aligns every leaf position with the BP
+            # message of the ancestor that explains it. extend_time expands one
+            # ancestor message over all descendant leaves.
             for i in range(self.n_layer-1,-1,-1):
                 extend_time *= self.n_child
                 guided_layer = [] 
@@ -516,7 +549,8 @@ class GHMTree:
                 guided_layers.append(guided_layer)
         
         elif self.dns_flag:
-
+            # Denoising guidance concatenates downward h/q messages and upward
+            # bu messages so a neural layer can match the exact inference state.
             for i in range(self.n_layer,0,-1):
                 guided_layer_h = []
                 guided_layer_q = [] 
@@ -560,25 +594,29 @@ class GHMTree:
 
     @property
     def leaves_nodes(self):
+        """Return node objects at the leaf layer."""
         return self.Tree[-1]
     
     @property
     def root_node(self):
+        """Return the root node object."""
         return self.Tree[0][0]
 
     @property
     def leaves_values(self):
+        """Return sampled values for all leaf nodes."""
         return self.T_value[-1]
 
     @property
     def root_value(self):
+        """Return sampled root values for the batch."""
         return self.T_value[0][0]
 
 # Sampler Classes
 
 class SingleSampler:
     """
-    Single sampler for the GHM tree. 
+    Single-tree sampler used by classification and denoising tasks. 
     """
     def __init__(self, n_layer, n_child, p_y, p_flip,flip_scale=1.0, variable_type=10, translation_invariance=True, seedtree=42):
         self.n_layer = n_layer
@@ -596,12 +634,13 @@ class SingleSampler:
         translation_invariance=translation_invariance)
     
     def get_batch(self, batch_size=128):
+        """Return root labels and one leaf sequence from a sampled tree."""
         T = GHMTree(self.n_layer, self.n_child, self.variable_type, self.p_y, self.p_flip, self.transition, batch_size, build_tree=True)
         return T.T_value[0][0], T.T_value[-1][0]
 
 class DoubleSampler:
     """
-    Double sampler for the GHM tree. One is the image sampler and the other is the text sampler. 
+    Paired text/image GHM sampler with shared or independent roots as needed. 
     """
     def __init__(self, n_layers, n_childs, p_ys, p_flips, flip_scale=1, variable_type = 10, translation_invariance=True, seedtree = 42):
         self.n_layers = n_layers
@@ -619,12 +658,19 @@ class DoubleSampler:
         self.i_transition = GenTransition(n_layers[1], n_childs[1], variable_type, p_flips[1], flip_scale, translation_invariance=translation_invariance)
     
     def get_batch(self, batch_size=128):
+        """Return text/image roots and first-leaf observations from independent trees."""
+        # This simple helper samples the two modalities independently. CLIP and
+        # zero-shot routines use specialized methods below when shared roots are
+        # required.
         text_tree = GHMTree(self.n_layers[0], self.n_childs[0], self.variable_type, self.p_ys[0], self.p_flips[0], self.t_transition, batch_size, build_tree=True)
         image_tree = GHMTree(self.n_layers[1], self.n_childs[1], self.variable_type, self.p_ys[1], self.p_flips[1], self.i_transition, batch_size, build_tree=True)
 
         return text_tree.T_value[0][0], image_tree.T_value[0][0], text_tree.T_value[-1][0], image_tree.T_value[-1][0]
     
     def get_zeroshot_batch(self, batch_size=128, return_tree=False):
+        """Sample paired text/image trees with a shared root for zero-shot evaluation."""
+        # A common latent root makes the text and image leaves conditionally
+        # paired while still allowing each modality to use its own transitions.
         root_tree = np.random.choice(self.variable_type, size = batch_size)
         text_tree = GHMTree(self.n_layers[0], self.n_childs[0], self.variable_type, self.p_ys[0], self.p_flips[0], self.t_transition, batch_size, build_tree=True, root=root_tree)
         image_tree = GHMTree(self.n_layers[1], self.n_childs[1], self.variable_type, self.p_ys[1], self.p_flips[1], self.i_transition, batch_size, build_tree=True, root=root_tree)
@@ -637,11 +683,16 @@ class DoubleSampler:
 
 # Single Sampler Class
 class ClassificationSampler(SingleSampler):
+    """Sampler for supervised root classification from all leaf values."""
+
     def __init__(self, n_layer, n_child, p_y, p_flip=0.3, flip_scale=1, variable_type=10,translation_invariance=True, seedtree=42):
 
         super().__init__(n_layer, n_child, p_y, p_flip,flip_scale, variable_type, translation_invariance, seedtree) 
 
     def get_batch(self, batch_size=128, guide=False, device="cpu"):
+        """Return leaf tokens, root labels, optional BP guides, and posteriors."""
+        # Guide tensors are exact BP messages. They are only materialized when
+        # guided training needs them as auxiliary layer-level targets.
         tree = GHMTree(self.n_layer, self.n_child, self.variable_type, self.p_y, self.p_flip, self.transition, batch_size, build_tree=True)
         leaves_values = torch.tensor(tree.leaves_values, dtype=torch.long).T.to(device)
         root_values = torch.tensor(tree.root_value, dtype=torch.long).to(device)
@@ -655,7 +706,7 @@ class ClassificationSampler(SingleSampler):
     
     def get_Bayes(self,n_eval=10000):
         """
-        Get the Bayesian Error.
+        Estimate the Bayes cross-entropy for root classification.
         """
         res = self.get_batch(batch_size=n_eval, guide=True)
         predict_pp = res[-1]
@@ -669,6 +720,7 @@ class ClassificationSampler(SingleSampler):
         return loss.mean().item(), loss.std().item() / np.sqrt(n_eval)
     
 class DenoiseSampler(SingleSampler):
+    """Sampler for denoising noisy observations of one GHM tree."""
 
     def __init__(self, n_layer, n_child, p_y, p_flip=0.3, sigma=1, flip_scale=1, variable_type=10,translation_invariance=True, seedtree=42):
 
@@ -676,6 +728,7 @@ class DenoiseSampler(SingleSampler):
         self.sigma = sigma
     
     def get_batch(self, batch_size=128, guide=False, device="cpu"):
+        """Return noisy leaves, clean leaves, optional guides, and posterior means."""
         tree = GHMTree(self.n_layer, self.n_child, self.variable_type, self.p_y, self.p_flip, self.transition, batch_size, build_tree=True)
         zs = np.random.randn(self.n_child**self.n_layer, batch_size) * self.sigma + tree.leaves_values
         xs = torch.tensor(tree.leaves_values, dtype=torch.float).T.to(device)
@@ -691,12 +744,17 @@ class DenoiseSampler(SingleSampler):
 
 # Double Sampler Class
 class ClipSampler(DoubleSampler):
+    """Sampler that constructs matched and mismatched pairs for CLIP training."""
 
     def __init__(self, n_layers, n_childs, p_ys, p_flips, K=4, flip_scale=1, variable_type=10, translation_invariance=True, seedtree=42):
         super().__init__(n_layers, n_childs, p_ys, p_flips, flip_scale, variable_type, translation_invariance, seedtree)
         self.K = K
     
     def get_batch(self, device="cpu", batch_size=128, guide=False):
+            """Return text/image batches arranged for the symmetric K-way CLIP loss."""
+            # The first two blocks are matched pairs used by the two symmetric
+            # directions of the CLIP objective. The remaining K-1 blocks are
+            # independent negatives aligned by PPCLIPLoss/GuidedClipLoss.
             text_tree_root = np.random.choice(self.variable_type, size = batch_size *(self.K+1)) 
             image_tree_root = np.random.choice(self.variable_type, size = batch_size *(self.K-1)) 
             image_tree_root = np.append(text_tree_root[:2*batch_size], image_tree_root) 
@@ -727,13 +785,13 @@ class ClipSampler(DoubleSampler):
     
     def get_Bayes(self,n_eval=10000):
         """
-        Get the Bayesian Error.
+        Estimate the Bayes CLIP loss using exact GHM posteriors.
         """
         res = self.get_batch(batch_size=n_eval, guide=True)
         ttree_pp = res[0][3].T
         itree_pp = res[1][3].T
 
-        # K imdage and 1 text 
+        # K images and 1 text.
         t_pp_match = ttree_pp[:, :n_eval] 
         i_pp_match = itree_pp[:, :n_eval] 
         t_pp_indep = ttree_pp[:, 2*n_eval:] 
@@ -759,6 +817,7 @@ class ClipSampler(DoubleSampler):
         return np.mean(S), np.std(S) / np.sqrt(n_eval)
 
 def clip_loss_compute(ttree_pp, itree_pp, n_eval, K, variable_type):
+        """Compute the symmetric CLIP loss directly from posterior matrices."""
         
         t_pp_match = ttree_pp[:, :n_eval] 
         i_pp_match = itree_pp[:, :n_eval] 
@@ -771,7 +830,7 @@ def clip_loss_compute(ttree_pp, itree_pp, n_eval, K, variable_type):
         S_indep = S_indep.dot(concat_mat)* variable_type 
         S = -np.log(S_match/(S_indep + S_match)) 
 
-        # K text and 1 image 
+        # K texts and 1 image.
         t_pp_match = ttree_pp[:, n_eval: 2*n_eval] 
         i_pp_match = itree_pp[:, n_eval: 2*n_eval]
         i_pp_indep = itree_pp[:, 2*n_eval:] 
@@ -786,13 +845,16 @@ def clip_loss_compute(ttree_pp, itree_pp, n_eval, K, variable_type):
 
 class ConditionalDenoiseSampler(DoubleSampler):
     """
-    Conditional denoise sampler for the GHM tree.
+    Paired-tree sampler for denoising image leaves conditioned on text.
     """
     def __init__(self, n_layers, n_childs, p_ys, p_flips, sigma=1, flip_scale=1, variable_type=10, translation_invariance=True, seedtree=42):
         super().__init__(n_layers, n_childs, p_ys, p_flips, flip_scale, variable_type, translation_invariance, seedtree)
         self.sigma = sigma
     
     def get_batch(self, batch_size=128, device="cpu", guide=False):
+        """Return text context, noisy image observations, BP guides, and targets."""
+        # Text and image trees share a latent root. Text BP produces an external
+        # root message that conditions image denoising.
         tree_root = np.random.choice(self.variable_type, size = batch_size)
         
         text_tree = GHMTree(self.n_layers[0], self.n_childs[0], self.variable_type, self.p_ys[0], self.p_flips[0], self.t_transition, batch_size, build_tree=True, root=tree_root)
@@ -823,7 +885,7 @@ class ConditionalDenoiseSampler(DoubleSampler):
     
     def get_Bayes(self,n_eval=30000):
         """
-        Get the Baysian Error. 
+        Estimate the Bayes mean-squared error for conditional denoising. 
         """
         res = self.get_batch(batch_size=n_eval, guide=True)
         pred = res[1][3] 
@@ -832,10 +894,15 @@ class ConditionalDenoiseSampler(DoubleSampler):
         return np.mean(loss), np.std(loss) / np.sqrt(n_eval)
 
 class NextWordPredictSampler(DoubleSampler):
+    """Paired-tree sampler for image-conditioned next-word prediction."""
+
     def __init__(self, n_layers, n_childs, p_ys, p_flips, flip_scale=1, variable_type=10, translation_invariance=True, seedtree=42):
         super().__init__(n_layers, n_childs, p_ys, p_flips, flip_scale, variable_type, translation_invariance, seedtree)
     
     def get_batch(self, batch_size=128, device="cpu", guide=False):
+        """Return autoregressive text inputs/targets plus image context."""
+        # The text tree is shifted by one position to form next-token inputs and
+        # targets. Image BP provides the external context message.
         tree_root = np.random.choice(self.variable_type, size = batch_size)
         
         text_tree = GHMTree(self.n_layers[0], self.n_childs[0], self.variable_type, self.p_ys[0], self.p_flips[0], self.t_transition, batch_size, build_tree=True, root=tree_root)
@@ -863,7 +930,7 @@ class NextWordPredictSampler(DoubleSampler):
 
     def get_Bayes(self,n_eval=30000):
         """
-        Get the Baysian Error. 
+        Estimate the Bayes cross-entropy for next-word prediction. 
         """
         res = self.get_batch(batch_size=n_eval, guide=True)
         pred = res[0][-1] 

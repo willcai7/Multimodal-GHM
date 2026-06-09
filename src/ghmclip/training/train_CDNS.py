@@ -1,5 +1,5 @@
 """
-Train the conditional denoising tasks.
+Train a conditional denoising model on paired text/image GHM trees.
 """
 import os 
 import sys
@@ -16,11 +16,15 @@ from ghmclip.utils import *
 # Generate the Config class for the training script
 @dataclass 
 class TrainingConfig(UtilConfig, DoubleTreeConfig, ModelConfig):
+    """CLI configuration for joint conditional denoising training."""
+
     job_name: Optional[str] = field(default='cond_denoising')
 
 parser = HfArgumentParser(TrainingConfig)
 config = parser.parse_args_into_dataclasses()[0]
 config_dict = vars(config)
+# Promote parsed CLI fields into local variables to match the compact style used
+# by the original experiment scripts.
 locals().update(config_dict)
 
 # CUDA device
@@ -34,6 +38,8 @@ d_i_model = n_itree_child**n_itree_layer
 d_model =d_i_model + d_tmodel
 # Model 
 timestamp = time.strftime('%Y%m%d-%H%M%S', time.localtime())
+# Keep checkpoint folder names deterministic from the data/model config. The
+# figure scripts rely on this naming convention.
 tree_folder = f'K{K}_L{n_ttree_layer}C{n_ttree_child}p{int(p_ttree_flip*100)}_L{n_itree_layer}C{n_itree_child}p{int(p_itree_flip*100)}sc{int(flip_scale*10)}'
 model_name = f'L{n_model_layer}H{n_head}D{d_eb}'
 tags=[job_name, tree_folder]
@@ -47,6 +53,7 @@ else:
 directory = os.path.join("./logs", job_name, tree_folder, model_name, timestamp) 
 logger = GenLogger(directory, config, raw=raw)
 if not raw:
+    # raw=False enables durable logs/checkpoints and WandB tracking.
     wandb.init(project=wandb_project, name = timestamp + '-' + model_name, tags=tags, dir=wandb_path)
     wandb.config.update(asdict(config)) 
     checkpoint_path = os.path.join(directory, 'checkpoint.pth')
@@ -54,6 +61,8 @@ if not raw:
 # sampler 
 
 p_y = np.ones(variable_type) / variable_type 
+# Text and image trees share a latent root; text evidence conditions image
+# denoising through exact BP messages inside the sampler.
 sampler = ConditionalDenoiseSampler([n_ttree_layer, n_itree_layer], 
                                             [n_ttree_child, n_itree_child], 
                                             [p_y, p_y], 
@@ -64,6 +73,7 @@ sampler = ConditionalDenoiseSampler([n_ttree_layer, n_itree_layer],
                                             translation_invariance=True, 
                                             seedtree=42)
 Bayes_loss, Bayes_std = sampler.get_Bayes(n_eval=10000)
+# Store the exact Bayes MSE baseline for downstream risk figures.
 logger.info(f'Bayes Loss: {Bayes_loss}, Bayes Std: {Bayes_std}')
 if not raw:
     wandb.log({'Bayes_loss': Bayes_loss, 'Bayes_std': Bayes_std})
@@ -87,7 +97,7 @@ model = ConditionalDenoiseEncoderTransformer(n_token=d_model,
                             guide=guide)
 model = model.to(device)
 
-# Loss an optimizer
+# Loss and optimizer
 # loss = LsLoss()
 loss = ConditionalGuidedLsLoss(penalty=penalty, guide=guide)
 loss_nop = LsLoss()
@@ -95,6 +105,8 @@ optimizer = AdamW(params=model.parameters(), lr=None)
 ploss_history = np.zeros(total_iters)
 loss_history = np.zeros(total_iters)
 compare_history = np.zeros(total_iters)
+# compare_history measures distance to the exact posterior mean, while
+# loss_history measures distance to sampled clean leaves.
 
 # loading from checkpoint
 if init_from != 'scratch':
@@ -111,10 +123,14 @@ iter_num = 0
 # total_iter = 1 
 while iter_num < total_iters: 
     optimizer.zero_grad() 
+    # Generate paired text/image trees online. When guide=True, sampler returns
+    # exact BP messages that supervise selected transformer layers.
     res_text, res_image = sampler.get_batch(device=device, batch_size=batch_size, guide=guide)
     guided_layers = [res_text[2], res_image[2]]
     posterior = torch.tensor(res_image[3], dtype=torch.float32).to(device)
     
+    # The model receives discrete text leaves and noisy image leaves, and
+    # predicts clean image leaf values.
     out = model(res_text[0], res_image[0])
     output = loss(out, [res_image[1], guided_layers])
     output = output[0]
@@ -144,6 +160,8 @@ while iter_num < total_iters:
                         
     
     if iter_num % eval_interval == 0 and not raw:
+        # Save enough state for resuming training and for risk evaluators that
+        # only need loss_history and bayes.
         torch.save({'model_state_dict': model.state_dict(), 'optimizer_state_dict': optimizer.state_dict(), 
                 'loss': loss, 'iter': iter_num, 'loss_history':loss_history, 'ploss_history':ploss_history, 'bayes':Bayes_loss}, checkpoint_path)
     iter_num += 1

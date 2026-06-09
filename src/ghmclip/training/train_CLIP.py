@@ -1,5 +1,5 @@
 """
-Train the conditional denoising tasks.
+Train paired text/image encoders with the CLIP contrastive objective.
 """
 import os 
 import sys
@@ -16,11 +16,15 @@ from ghmclip.utils import *
 # Generate the Config class for the training script
 @dataclass 
 class TrainingConfig(UtilConfig, DoubleTreeConfig, ClipModelConfig):
+    """CLI configuration for CLIP training on paired GHM trees."""
+
     job_name: Optional[str] = field(default='clip')
 
 parser = HfArgumentParser(TrainingConfig)
 config = parser.parse_args_into_dataclasses()[0]
 config_dict = vars(config)
+# The original scripts use config field names as local variables. Keep that
+# pattern so existing experiment shell scripts continue to map directly to code.
 locals().update(config_dict)
 guide = clip_guide
 # CUDA device
@@ -34,6 +38,8 @@ d_imodel = n_itree_child**n_itree_layer
 d_model =d_imodel + d_tmodel
 # Model 
 timestamp = time.strftime('%Y%m%d-%H%M%S', time.localtime())
+# Folder names encode both tree parameters and model architecture. Figure
+# evaluators reconstruct these names when loading checkpoints.
 tree_folder = f'K{K}_L{n_ttree_layer}C{n_ttree_child}p{int(p_ttree_flip*100)}_L{n_itree_layer}C{n_itree_child}p{int(p_itree_flip*100)}sc{int(flip_scale*10)}'
 model_name = f'L{clip_tmodel_nlayer}H{clip_tmodel_nhead}D{clip_tmodel_deb}_L{clip_imodel_nlayer}H{clip_imodel_nhead}D{clip_imodel_deb}'
 tags=[job_name, tree_folder]
@@ -47,6 +53,8 @@ else:
 directory = os.path.join("./logs", job_name, tree_folder, model_name, timestamp) 
 logger = GenLogger(directory, config, raw=raw)
 if not raw:
+    # raw=True keeps the run lightweight for local smoke tests. raw=False writes
+    # checkpoints and WandB metadata used by the reproduction scripts.
     wandb.init(project=wandb_project, name = timestamp + '-' + model_name, tags=tags, dir=wandb_path)
     wandb.config.update(asdict(config)) 
     checkpoint_path = os.path.join(directory, 'checkpoint.pth')
@@ -54,6 +62,8 @@ if not raw:
 # sampler 
 
 p_y = np.ones(variable_type) / variable_type 
+# CLIP batches include matched text/image pairs plus K-way negatives. The same
+# sampler can optionally return exact BP guide targets.
 sampler = ClipSampler([n_ttree_layer, n_itree_layer], 
                     [n_ttree_child, n_itree_child], 
                     [p_y, p_y], 
@@ -64,6 +74,7 @@ sampler = ClipSampler([n_ttree_layer, n_itree_layer],
                     translation_invariance=True, 
                     seedtree=42)
 Bayes_loss, Bayes_std = sampler.get_Bayes(n_eval=10000)
+# Bayes_loss is the exact GHM baseline stored in every checkpoint for plotting.
 logger.info(f'Bayes Loss: {Bayes_loss}, Bayes Std: {Bayes_std}')
 if not raw:
     wandb.log({'Bayes_loss': Bayes_loss, 'Bayes_std': Bayes_std})
@@ -107,6 +118,8 @@ optimizer = AdamW(params=list(tmodel.parameters())
 
 ploss_history = np.zeros(total_iters+1)
 loss_history = np.zeros(total_iters+1)
+# ploss_history includes guided penalties; loss_history records the plain CLIP
+# objective so figures can compare model risk against the Bayes baseline.
 # compare_history = np.zeros(total_iters)
 
 # loading from checkpoint
@@ -127,15 +140,21 @@ while iter_num < total_iters+1:
     
     optimizer.zero_grad() 
 
+    # Sample a fresh synthetic batch each iteration. GHM data are generated
+    # online, so there is no persistent training dataset on disk.
     res_text, res_image = sampler.get_batch(device=device, batch_size=batch_size, guide=guide)
     guided_layers = [res_text[2], res_image[2]]
     
+    # Encode text and image leaves independently, then score them with the
+    # symmetric CLIP objective.
     tmodel_output = tmodel(res_text[0])
     imodel_output = imodel(res_image[0])
 
     output = loss(tmodel_output, imodel_output, guided_layers)
     output_nop = loss_nop(tmodel_output, imodel_output, guided_layers)
 
+    # Backpropagate only the configured training objective. output_nop is logged
+    # as a penalty-free diagnostic.
     output[0].backward() 
 
     ploss_history[iter_num] = output[0].item()
@@ -169,6 +188,8 @@ while iter_num < total_iters+1:
                         
     
     if iter_num % eval_interval == 0 and not raw:
+        # The figure evaluators load checkpoint.pth and read both model weights
+        # and the final loss history window.
         torch.save({'tmodel_state_dict': tmodel.state_dict(),
                     'imodel_state_dict':imodel.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),

@@ -3,12 +3,12 @@ Tests of functions, classes, and models.
 """
 import os 
 import sys
-src_path = os.path.join(os.path.dirname(__file__), '..','..')
+src_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'src'))
 sys.path.append(src_path)
 
 import unittest 
 import numpy as np
-from src.data.data_random_GHM import * 
+from ghmclip.data.data_random_GHM import ConditionalDenoiseSampler, DenoiseSampler
 
 # Parameters for the tests 
 n_layers = [3,4]
@@ -23,7 +23,7 @@ sigma=0.1
 
 def denoise_test(true_leave_values, pred_leave_values):
     """
-    Test the denoising function by comparing the true and predicted leave values.
+    Test the denoising function by comparing the true and predicted leaf values.
     """
     true_leave_values = np.array(true_leave_values)
     mean_power_res = np.mean(np.power(pred_leave_values,2),1)
@@ -33,7 +33,10 @@ def denoise_test(true_leave_values, pred_leave_values):
 
 
 class TestDenoising(unittest.TestCase):
+    """Regression tests for posterior denoising samplers."""
+
     def test_conditional_denoising(self):
+        """Check conditional denoising against the posterior moment identity."""
         batch_size = 10000
         sampler = ConditionalDenoiseSampler(n_layers, n_childs, p_ys, p_flips, flip_scale=flip_scale, sigma=sigma, translation_invariance=translation_invariance,variable_type=variable_type)
         _, res_image = sampler.get_batch(batch_size=batch_size, guide=True)
@@ -42,6 +45,7 @@ class TestDenoising(unittest.TestCase):
         print("Conditional denoising test passed with error: ", err)
 
     def test_denoising(self):
+        """Check unconditional denoising against the posterior moment identity."""
         batch_size = 10000
         sampler = DenoiseSampler(n_layers[0], n_childs[0], p_ys[0], p_flips[0],  flip_scale=flip_scale, sigma=sigma, translation_invariance=translation_invariance,variable_type=variable_type)
         res = sampler.get_batch(batch_size=batch_size, guide=True)

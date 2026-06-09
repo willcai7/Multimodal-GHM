@@ -1,5 +1,5 @@
 """
-Train the next word prediction tasks.
+Train a sequential next-word predictor from a frozen CLIP image encoder.
 """
 import os 
 import sys
@@ -16,12 +16,15 @@ from ghmclip.utils import *
 # Generate the Config class for the training script
 @dataclass 
 class TrainingConfig(UtilConfig, DoubleTreeConfig, ModelConfig):
+    """CLI configuration for sequential next-word-prediction training."""
+
     clip_feature: Optional[str] = field(default='GT')
     job_name: Optional[str] = field(default='Sequential_NWP')
 
 parser = HfArgumentParser(TrainingConfig)
 config = parser.parse_args_into_dataclasses()[0]
 config_dict = vars(config)
+# Promote parsed CLI fields to local variables, matching the original scripts.
 locals().update(config_dict)
 
 # CUDA device
@@ -35,6 +38,8 @@ d_imodel = n_itree_child**n_itree_layer
 d_model =d_tmodel
 # Model 
 timestamp = time.strftime('%Y%m%d-%H%M%S', time.localtime())
+# Sequential VLM reuses the CLIP tree folder name to find the pretrained image
+# encoder for the same synthetic distribution.
 tree_folder = f'K{K}_L{n_ttree_layer}C{n_ttree_child}p{int(p_ttree_flip*100)}_L{n_itree_layer}C{n_itree_child}p{int(p_itree_flip*100)}sc{int(flip_scale*10)}'
 model_name = f'L{n_model_layer}H{n_head}D{d_eb}'
 tags=[job_name, tree_folder]
@@ -52,6 +57,7 @@ else:
 directory = os.path.join("./logs", job_name, tree_folder, model_name, timestamp) 
 logger = GenLogger(directory, config, raw=raw)
 if not raw:
+    # raw=False writes checkpoints and logs used by reproduction/evaluation.
     wandb.init(project=wandb_project, name = timestamp + '-' + model_name, tags=tags, dir=wandb_path)
     wandb.config.update(asdict(config)) 
     checkpoint_path = os.path.join(directory, 'checkpoint.pth')
@@ -78,6 +84,8 @@ else:
     Bayes_std = 0
 
 # Clip image model
+# Build the CLIP image encoder with the architecture expected by the released
+# CLIP checkpoints, then freeze its feature as a one-token image prefix.
 clip_image_model = EncoderTransformer(n_token=d_imodel,
                             num_class=variable_type,
                             n_embd=128,
@@ -94,6 +102,7 @@ clip_image_model = EncoderTransformer(n_token=d_imodel,
 clip_path = os.path.join("logs", "CLIP", tree_folder)
 model_folders = os.listdir(clip_path)
 for folder in model_folders:
+    # Select guided or standard CLIP features according to clip_feature.
     if "GT" in folder and clip_feature == "GT":
     # if "TF" in folder and "L5" in folder:
         clip_path = os.path.join(clip_path, folder)
@@ -150,6 +159,8 @@ total_iter = 1
 while iter_num < total_iters: 
     optimizer.zero_grad() 
     res_text, res_image = sampler.get_batch(device=device, batch_size=batch_size, guide=guide)
+    # Convert image leaves into a frozen CLIP feature before the autoregressive
+    # text model predicts the next text leaf.
     clip_image_output = clip_image_model(res_image[0])[0].unsqueeze(1)
     guided_layers = [res_text[-2], [clip_image_output,clip_image_output]]
     posterior = res_text[-1].to(device)
@@ -192,6 +203,7 @@ while iter_num < total_iters:
                         
     
     if iter_num % eval_interval == 0 and not raw:
+        # Save histories and posterior-comparison diagnostics for VLM risk plots.
         torch.save({'model_state_dict': model.state_dict(), 'optimizer_state_dict': optimizer.state_dict(), 
                 'loss': loss, 'iter': iter_num, 'loss_history':loss_history, 'ploss_history':ploss_history, 'bayes':Bayes_loss, 'compare':compare_history}, checkpoint_path)
     iter_num += 1

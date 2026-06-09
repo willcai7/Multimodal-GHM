@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+"""Remove unserializable or unnecessary loss objects from checkpoint files."""
+
 import argparse
 import sys
 import os
@@ -16,6 +18,7 @@ DEFAULT_EXTENSIONS = {".pth", ".pt", ".ckpt"}
 
 
 def iter_files(root: Path, exts: Iterable[str]) -> Iterable[Path]:
+    """Yield checkpoint-like files under ``root`` matching ``exts``."""
     lower_exts = {e.lower() for e in exts}
     for path in root.rglob("*"):
         if path.is_file():
@@ -25,6 +28,7 @@ def iter_files(root: Path, exts: Iterable[str]) -> Iterable[Path]:
 
 
 def ensure_backup_path(original: Path) -> Path:
+    """Return a non-existing backup path next to ``original``."""
     backup = original.with_suffix(original.suffix + ".bak")
     if not backup.exists():
         return backup
@@ -38,6 +42,7 @@ def ensure_backup_path(original: Path) -> Path:
 
 
 def remove_loss_key(checkpoint_path: Path, dry_run: bool, create_backup: bool) -> Tuple[bool, str]:
+    """Remove the top-level ``loss`` entry from one PyTorch checkpoint."""
     try:
         # Safe to cpu
         ckpt = torch.load(str(checkpoint_path), map_location="cpu", weights_only=False)
@@ -73,6 +78,7 @@ def remove_loss_key(checkpoint_path: Path, dry_run: bool, create_backup: bool) -
 
 
 def main(argv: List[str]) -> int:
+    """Parse CLI arguments and process all matching checkpoints."""
     parser = argparse.ArgumentParser(description="Remove top-level 'loss' key from PyTorch checkpoints.")
     parser.add_argument(
         "--root",
